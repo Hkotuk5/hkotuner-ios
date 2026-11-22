@@ -4,14 +4,31 @@ struct TrackRow: View {
     @EnvironmentObject private var player: Player
     @EnvironmentObject private var library: LibraryStore
     let track: Track
+    /// an album's track number instead of the cover
+    var number: Int? = nil
 
     var body: some View {
         HStack(spacing: 12) {
-            Artwork(url: track.thumbnailURL)
+            if let number {
+                Text("\(number)")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(isCurrent ? Theme.accent : Theme.muted)
+                    .frame(width: 26)
+            } else {
+                Artwork(url: track.thumbnailURL, size: 48, radius: 8)
+                    .overlay {
+                        if isCurrent {
+                            RoundedRectangle(cornerRadius: 8).fill(.black.opacity(0.45))
+                            Image(systemName: player.isPlaying ? "waveform" : "pause.fill")
+                                .font(.callout.weight(.bold))
+                                .foregroundStyle(Theme.accent)
+                        }
+                    }
+            }
             VStack(alignment: .leading, spacing: 3) {
                 Text(track.title)
                     .font(.body)
-                    .foregroundStyle(player.current?.id == track.id ? Theme.accent : Theme.ink)
+                    .foregroundStyle(isCurrent ? Theme.accent : Theme.ink)
                     .lineLimit(1)
                 HStack(spacing: 4) {
                     if let id = track.videoId, AudioCache.isOffline(id) {
@@ -26,7 +43,10 @@ struct TrackRow: View {
             }
         }
         .contentShape(Rectangle())
+        .listRowBackground(Color.clear)
     }
+
+    private var isCurrent: Bool { player.current?.id == track.id }
 
     private var subtitle: String {
         [track.artist, track.durationText].filter { !$0.isEmpty }.joined(separator: " · ")
@@ -39,6 +59,7 @@ struct TrackMenu: ViewModifier {
     @EnvironmentObject private var library: LibraryStore
     let track: Track
     @State private var picking = false
+    @State private var showArtist = false
 
     func body(content: Content) -> some View {
         content
@@ -55,6 +76,12 @@ struct TrackMenu: ViewModifier {
                     Button { player.playSingle(track) } label: {
                         Label("Похожие треки", systemImage: "dot.radiowaves.left.and.right")
                     }
+                    if !track.artist.isEmpty {
+                        Button { showArtist = true } label: { Label("Исполнитель", systemImage: "music.mic") }
+                    }
+                    if let link = URL(string: track.url) {
+                        ShareLink(item: link) { Label("Поделиться", systemImage: "square.and.arrow.up") }
+                    }
                     Button(role: library.isDisliked(track) ? nil : .destructive) { library.toggleDislike(track) } label: {
                         library.isDisliked(track)
                             ? Label("Вернуть в рекомендации", systemImage: "hand.thumbsup")
@@ -64,6 +91,14 @@ struct TrackMenu: ViewModifier {
             }
             .sheet(isPresented: $picking) {
                 PlaylistPicker(tracks: [track])
+            }
+            .sheet(isPresented: $showArtist) {
+                NavigationStack {
+                    ArtistView(artistId: track.artistId, name: LyricsService.mainArtist(track.artist))
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { showArtist = false } }
+                        }
+                }
             }
     }
 }
@@ -84,21 +119,25 @@ struct PlaylistPicker: View {
         NavigationStack {
             List {
                 Button { naming = true } label: { Label("Новый плейлист", systemImage: "plus") }
+                    .listRowBackground(Color.clear)
                 ForEach(library.library.playlists) { playlist in
                     Button {
                         library.add(tracks, to: playlist.id)
                         dismiss()
                     } label: {
-                        HStack {
-                            Artwork(url: playlist.tracks.first?.thumbnailURL, size: 40)
+                        HStack(spacing: 12) {
+                            PlaylistCover(playlist: playlist, size: 44, radius: 8)
                             VStack(alignment: .leading) {
                                 Text(playlist.name).foregroundStyle(Theme.ink)
-                                Text("\(playlist.tracks.count) треков").font(.caption).foregroundStyle(Theme.muted)
+                                Text(songsText(playlist.tracks.count)).font(.caption).foregroundStyle(Theme.muted)
                             }
                         }
                     }
+                    .listRowBackground(Color.clear)
                 }
             }
+            .listStyle(.plain)
+            .screenBackground()
             .navigationTitle("В плейлист")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } } }

@@ -4,12 +4,18 @@ import MediaPlayer
 import SwiftUI
 import UIKit
 
-/// The queue and the one AVPlayer behind it: background audio, the lock
-/// screen and Control Center, headphone buttons, and songs that keep coming
-/// (YouTube Music's radio) when the queue runs out.
+/// The queue and what plays it: files on the phone go through AVAudioEngine
+/// (equalizer, levelling), a stream iOS reads itself (HLS) goes through
+/// AVPlayer. Background audio, the lock screen and Control Center, headphone
+/// buttons, a sleep timer, and songs that keep coming (YouTube Music's radio)
+/// when the queue runs out.
 @MainActor
 final class Player: ObservableObject {
     static let shared = Player()
+
+    enum Repeat: String, CaseIterable {
+        case off, all, one
+    }
 
     @Published private(set) var queue: [Track] = []
     @Published private(set) var index = 0
@@ -18,16 +24,24 @@ final class Player: ObservableObject {
     @Published private(set) var position: Double = 0
     @Published private(set) var length: Double = 0
     @Published private(set) var isWave = false
-    @Published var repeatOne = false
+    @Published var repeatMode: Repeat = .off
     /// similar songs follow when the queue ends
     @Published var autoContinue = true
     @Published var message: String?
+    /// true while the sound goes through the equalizer; a stream plays without it
+    @Published private(set) var throughEngine = false
+    @Published private(set) var sleepAt: Date?
+    @Published private(set) var sleepAfterTrack = false
 
     var current: Track? { queue.indices.contains(index) ? queue[index] : nil }
     var upcoming: [Track] { queue.indices.contains(index + 1) ? Array(queue[(index + 1)...]) : [] }
 
-    private let player = AVPlayer()
-    private var timeObserver: Any?
+    let engine = EnginePlayer()
+    private let stream = AVPlayer()
+    private enum Backend { case none, engine, stream }
+    private var backend = Backend.none
+
+    private var ticker: Timer?
     private var loadTask: Task<Void, Never>?
     private var extending = false
     private var failures = 0
@@ -35,21 +49,28 @@ final class Player: ObservableObject {
     private var artworkFor: String?
     private var bag = Set<AnyCancellable>()
     private var itemStatus: AnyCancellable?
+    /// where a song brought back from the last session starts
+    private var resumeAt: Double?
+    private var lastTick = Date()
+    private var listened: Double = 0
+    private var counted = false
+    private var sinceSave: Double = 0
 
     private var library: LibraryStore { LibraryStore.shared }
 
     private init() {
-        player.automaticallyWaitsToMinimizeStalling = true
+        stream.automaticallyWaitsToMinimizeStalling = true
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: .longFormAudio)
 
-        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] time in
-            Task { @MainActor in self?.tick(time) }
-        }
-        player.publisher(for: \.timeControlStatus)
+        engine.onFinish = { [weak self] in self?.finished() }
+        // not AudioSettings.apply(): that asks for Player.shared, which is being made right now
+        engine.setEqualizer(on: AudioSettings.shared.eqOn, gains: AudioSettings.shared.gains)
+
+        stream.publisher(for: \.timeControlStatus)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
                 Task { @MainActor in
-                    guard let self else { return }
+                    guard let self, self.backend == .stream else { return }
                     self.isPlaying = status != .paused
                     self.updateNowPlaying()
                 }
@@ -60,7 +81,7 @@ final class Player: ObservableObject {
             .sink { [weak self] note in
                 let item = note.object as? AVPlayerItem
                 Task { @MainActor in
-                    guard let self, let item, item === self.player.currentItem else { return }
+                    guard let self, let item, item === self.stream.currentItem else { return }
                     self.finished()
                 }
             }
@@ -70,7 +91,7 @@ final class Player: ObservableObject {
             .sink { [weak self] note in
                 let item = note.object as? AVPlayerItem
                 Task { @MainActor in
-                    guard let self, let item, item === self.player.currentItem else { return }
+                    guard let self, let item, item === self.stream.currentItem else { return }
                     self.message = "Воспроизведение прервалось"
                     self.next()
                 }
@@ -79,11 +100,22 @@ final class Player: ObservableObject {
         NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] note in
-                let shouldResume = Player.shouldResume(after: note)
-                Task { @MainActor in if shouldResume { self?.resumeAfterInterruption() } }
+                let event = Player.interruption(note)
+                Task { @MainActor in self?.interrupted(began: event.began, resume: event.resume) }
+            }
+            .store(in: &bag)
+        NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] note in
+                let unplugged = Player.headphonesGone(note)
+                Task { @MainActor in if unplugged { self?.pause() } }
             }
             .store(in: &bag)
         Player.setupRemoteCommands()
+        restoreSession()
+        ticker = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tick() }
+        }
     }
 
     // MARK: what to play
@@ -137,6 +169,17 @@ final class Player: ObservableObject {
         queue.remove(atOffsets: absolute)
     }
 
+    func moveUpcoming(from source: IndexSet, to destination: Int) {
+        var rest = upcoming
+        rest.move(fromOffsets: source, toOffset: destination)
+        queue = Array(queue[...index]) + rest
+    }
+
+    func clearUpcoming() {
+        guard queue.indices.contains(index) else { return }
+        queue = Array(queue[...index])
+    }
+
     /// «Моя волна»: an endless radio from the songs you like and play
     func startWave() {
         let seeds = (Array(library.library.liked.prefix(60)) + Array(library.library.history.prefix(40))).filter { $0.isYouTube }
@@ -168,23 +211,48 @@ final class Player: ObservableObject {
     // MARK: controls
 
     func toggle() {
-        if player.currentItem == nil {
-            if current != nil && !isLoading { load() }
-            return
-        }
-        if player.timeControlStatus == .paused {
-            try? AVAudioSession.sharedInstance().setActive(true)
-            player.play()
-        } else {
-            player.pause()
+        switch backend {
+        case .none:
+            if current != nil && !isLoading { load(startAt: resumeAt) }
+        case .engine:
+            if engine.isPlaying { pause() } else { resume() }
+        case .stream:
+            if stream.timeControlStatus == .paused { resume() } else { pause() }
         }
     }
 
-    func pause() { player.pause() }
+    func pause() {
+        switch backend {
+        case .engine: engine.pause()
+        case .stream: stream.pause()
+        case .none: break
+        }
+        isPlaying = false
+        updateNowPlaying()
+        saveSession()
+    }
+
+    private func resume() {
+        try? AVAudioSession.sharedInstance().setActive(true)
+        switch backend {
+        case .engine:
+            do { try engine.play() } catch { message = "Звук не включился: \(error.localizedDescription)"; return }
+            isPlaying = true
+        case .stream:
+            stream.play()
+        case .none:
+            toggle()
+            return
+        }
+        updateNowPlaying()
+    }
 
     func next() {
         if index + 1 < queue.count {
             index += 1
+            load()
+        } else if repeatMode == .all && !queue.isEmpty {
+            index = 0
             load()
         } else if autoContinue {
             Task {
@@ -193,11 +261,11 @@ final class Player: ObservableObject {
                     self.index += 1
                     self.load()
                 } else {
-                    self.player.pause()
+                    self.pause()
                 }
             }
         } else {
-            player.pause()
+            pause()
             seek(to: 0)
         }
     }
@@ -213,23 +281,66 @@ final class Player: ObservableObject {
 
     func seek(to seconds: Double) {
         position = seconds
-        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        switch backend {
+        case .engine: engine.seek(to: seconds)
+        case .stream: stream.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        case .none: resumeAt = seconds
+        }
         updateNowPlaying()
+    }
+
+    func cycleRepeat() {
+        let all = Repeat.allCases
+        repeatMode = all[(all.firstIndex(of: repeatMode)! + 1) % all.count]
+    }
+
+    // MARK: sleep timer
+
+    func sleep(minutes: Int) {
+        sleepAfterTrack = false
+        sleepAt = Date().addingTimeInterval(Double(minutes) * 60)
+        setFade(1)
+    }
+
+    func sleepAtTrackEnd() {
+        sleepAt = nil
+        sleepAfterTrack = true
+        setFade(1)
+    }
+
+    func cancelSleep() {
+        sleepAt = nil
+        sleepAfterTrack = false
+        setFade(1)
+    }
+
+    private func setFade(_ value: Float) {
+        engine.setFade(value)
+        stream.volume = value
+    }
+
+    /// the levelling setting changed: the playing song takes the new level
+    func levelChanged() {
+        guard let track = current else { return }
+        engine.setLevel(AudioSettings.shared.normalize ? Loudness.gain(for: track) : 1)
     }
 
     // MARK: loading
 
-    private func load() {
+    private func load(startAt: Double? = nil) {
         loadTask?.cancel()
+        resumeAt = nil
         guard let track = current else { return }
         isLoading = true
         message = nil
-        player.pause()
-        player.replaceCurrentItem(with: nil)
-        position = 0
+        stopBackends()
+        position = startAt ?? 0
         length = track.duration ?? 0
+        listened = 0
+        counted = false
         loadArtwork(for: track)
         updateNowPlaying()
+        saveSession()
 
         // a song changed on the lock screen must finish loading in the background
         let background = UIApplication.shared.beginBackgroundTask(withName: "hkotuner.load")
@@ -239,10 +350,7 @@ final class Player: ObservableObject {
                 let source = try await Player.source(for: track)
                 guard !Task.isCancelled, self.current?.id == track.id else { return }
                 try? AVAudioSession.sharedInstance().setActive(true)
-                let item = AVPlayerItem(url: source.url)
-                self.watch(item, track: track)
-                self.player.replaceCurrentItem(with: item)
-                self.player.play()
+                self.start(source, track: track, at: startAt)
                 self.isLoading = false
                 self.failures = 0
                 self.library.pushHistory(track)
@@ -253,15 +361,70 @@ final class Player: ObservableObject {
                 }
             } catch {
                 guard !Task.isCancelled, self.current?.id == track.id else { return }
-                self.isLoading = false
-                self.failures += 1
-                self.message = "«\(track.title)» не включился: \(error.localizedDescription)"
-                if self.failures < 3 && self.index + 1 < self.queue.count {
-                    self.index += 1
-                    self.load()
-                }
+                self.failed(track, error)
             }
         }
+    }
+
+    private func start(_ source: PlaybackSource, track: Track, at: Double?) {
+        if case .file(let url) = source {
+            do {
+                try engine.open(url)
+                engine.setLevel(AudioSettings.shared.normalize ? Loudness.gain(for: track) : 1)
+                engine.setFade(sleepFade)
+                try engine.play(from: at ?? 0)
+                backend = .engine
+                throughEngine = true
+                if engine.duration > 0 { length = engine.duration }
+                isPlaying = true
+                return
+            } catch {
+                // a file the engine cannot read may still play in AVPlayer
+                engine.stop()
+            }
+        }
+        let item = AVPlayerItem(url: source.url)
+        watch(item, track: track)
+        backend = .stream
+        throughEngine = false
+        stream.volume = sleepFade
+        stream.replaceCurrentItem(with: item)
+        if let at, at > 0 { stream.seek(to: CMTime(seconds: at, preferredTimescale: 600)) }
+        stream.play()
+    }
+
+    private func stopBackends() {
+        engine.stop()
+        stream.pause()
+        stream.replaceCurrentItem(with: nil)
+        itemStatus = nil
+        backend = .none
+        isPlaying = false
+    }
+
+    private func failed(_ track: Track, _ error: Error) {
+        isLoading = false
+        failures += 1
+        if error is BotCheckError {
+            // what is on the phone still plays; the rest waits for another network
+            message = error.localizedDescription
+            if let i = queue.indices.dropFirst(index + 1).first(where: { Player.isOnPhone(queue[$0]) }) {
+                index = i
+                load()
+            }
+            return
+        }
+        message = "«\(track.title)» не включился: \(error.localizedDescription)"
+        if failures < 3 && index + 1 < queue.count {
+            index += 1
+            load()
+        }
+    }
+
+    static func isOnPhone(_ track: Track) -> Bool {
+        if track.isLocal { return true }
+        guard let id = track.videoId else { return false }
+        return AudioCache.localFile(id) != nil
     }
 
     /// a file that cannot be decoded never reaches its end: move on, and drop the bad copy
@@ -328,37 +491,129 @@ final class Player: ObservableObject {
     }
 
     private func finished() {
-        if repeatOne {
+        if sleepAfterTrack {
+            cancelSleep()
+            pause()
             seek(to: 0)
-            player.play()
+            return
+        }
+        if repeatMode == .one {
+            seek(to: 0)
+            resume()
         } else {
             next()
         }
     }
 
-    private func tick(_ time: CMTime) {
-        let seconds = CMTimeGetSeconds(time)
-        if seconds.isFinite { position = seconds }
-        if let d = player.currentItem?.duration, d.isNumeric {
-            let total = CMTimeGetSeconds(d)
-            if total.isFinite, total > 0, abs(total - length) > 0.5 {
-                length = total
-                updateNowPlaying()
+    // MARK: the clock
+
+    private var sleepFade: Float {
+        guard let sleepAt else { return 1 }
+        let left = sleepAt.timeIntervalSinceNow
+        return left < 12 ? Float(max(0, left / 12)) : 1
+    }
+
+    private func tick() {
+        let now = Date()
+        let delta = min(2, now.timeIntervalSince(lastTick))
+        lastTick = now
+        switch backend {
+        case .engine:
+            position = engine.currentTime
+        case .stream:
+            let seconds = CMTimeGetSeconds(stream.currentTime())
+            if seconds.isFinite { position = seconds }
+            if let d = stream.currentItem?.duration, d.isNumeric {
+                let total = CMTimeGetSeconds(d)
+                if total.isFinite, total > 0, abs(total - length) > 0.5 {
+                    length = total
+                    updateNowPlaying()
+                }
             }
+        case .none:
+            return
+        }
+        if let sleepAt {
+            if sleepAt.timeIntervalSinceNow <= 0 {
+                cancelSleep()
+                pause()
+            } else {
+                setFade(sleepFade)
+            }
+        }
+        guard isPlaying, let track = current else { return }
+        listened += delta
+        StatsStore.shared.listen(track, seconds: delta)
+        if !counted && listened >= min(30, max(10, length * 0.5)) {
+            counted = true
+            StatsStore.shared.countPlay(track)
+        }
+        sinceSave += delta
+        if sinceSave >= 10 {
+            sinceSave = 0
+            saveSession()
         }
     }
 
-    nonisolated private static func shouldResume(after note: Notification) -> Bool {
-        guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-              AVAudioSession.InterruptionType(rawValue: raw) == .ended,
-              let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
-        else { return false }
-        return AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume)
+    // MARK: the last session, back after a restart (paused)
+
+    private struct Session: Codable {
+        var queue: [Track]
+        var index: Int
+        var position: Double
+        var wave: Bool
     }
 
-    private func resumeAfterInterruption() {
-        try? AVAudioSession.sharedInstance().setActive(true)
-        player.play()
+    func saveSession() {
+        guard !queue.isEmpty else {
+            UserDefaults.standard.removeObject(forKey: "session.v1")
+            return
+        }
+        let from = max(0, index - 50)
+        let kept = Array(queue[from..<min(queue.count, index + 150)])
+        let session = Session(queue: kept, index: index - from, position: position, wave: isWave)
+        if let data = try? JSONEncoder().encode(session) {
+            UserDefaults.standard.set(data, forKey: "session.v1")
+        }
+    }
+
+    private func restoreSession() {
+        guard let data = UserDefaults.standard.data(forKey: "session.v1"),
+              let session = try? JSONDecoder().decode(Session.self, from: data),
+              session.queue.indices.contains(session.index) else { return }
+        queue = session.queue
+        index = session.index
+        isWave = session.wave
+        position = session.position
+        resumeAt = session.position > 5 ? session.position : nil
+        length = queue[index].duration ?? 0
+        if let track = current { loadArtwork(for: track) }
+        updateNowPlaying()
+    }
+
+    // MARK: interruptions and headphones
+
+    nonisolated private static func interruption(_ note: Notification) -> (began: Bool, resume: Bool) {
+        guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return (false, false) }
+        if type == .began { return (true, false) }
+        let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+        return (false, AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume))
+    }
+
+    nonisolated private static func headphonesGone(_ note: Notification) -> Bool {
+        guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt else { return false }
+        return AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable
+    }
+
+    private func interrupted(began: Bool, resume shouldResume: Bool) {
+        if began {
+            if backend == .engine { engine.pause() }
+            isPlaying = false
+            updateNowPlaying()
+        } else if shouldResume {
+            resume()
+        }
     }
 
     // MARK: lock screen and Control Center

@@ -8,6 +8,8 @@ struct ResolvedStream {
     /// the HLS manifest of the same answer; iOS plays it itself (not cached)
     var hls: URL?
     var userAgent: String
+    /// how much louder than YouTube's target level the song is, in dB
+    var loudnessDb: Double? = nil
 }
 
 /// Asks YouTube's `/player` endpoint for a song's audio, as a client that needs
@@ -41,12 +43,22 @@ enum StreamResolver {
         let status = JSONTree.string(root, "/playabilityStatus/status") ?? ""
         guard status == "OK" else {
             let reason = JSONTree.string(root, "/playabilityStatus/reason") ?? status
+            if isBotCheck(reason) { throw BotCheckError() }
             throw HKError(reason.isEmpty ? "YouTube не отдал этот трек" : "YouTube: \(reason)")
         }
         let best = pickAudio(root)
         let hls = JSONTree.string(root, "/streamingData/hlsManifestUrl").flatMap(URL.init(string:))
         guard best != nil || hls != nil else { throw HKError("у трека нет звука, который можно играть") }
-        return ResolvedStream(file: best?.url, contentLength: best?.length, hls: hls, userAgent: userAgent)
+        let loudness = (JSONTree.pointer(root, "/playerConfig/audioConfig/loudnessDb") as? Double)
+            ?? (JSONTree.pointer(root, "/playerConfig/audioConfig/perceptualLoudnessDb") as? Double).map { $0 + 14 }
+        return ResolvedStream(file: best?.url, contentLength: best?.length, hls: hls, userAgent: userAgent,
+                              loudnessDb: loudness.flatMap { $0.isFinite ? $0 : nil })
+    }
+
+    /// "Sign in to confirm you’re not a bot"
+    static func isBotCheck(_ reason: String) -> Bool {
+        let r = reason.lowercased()
+        return r.contains("not a bot") || r.contains("confirm you") && r.contains("bot")
     }
 
     /// the AAC audio format: itag 140 (128 kbit/s) when there, else the best m4a

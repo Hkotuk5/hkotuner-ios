@@ -87,6 +87,7 @@ actor AudioCache {
         for client in ClientConfigStore.shared.current.players {
             do {
                 let stream = try await StreamResolver.resolve(videoId: videoId, client: client)
+                if let db = stream.loudnessDb { Loudness.save(videoId, db) }
                 if fallback == nil { fallback = stream.hls }
                 if let file = stream.file {
                     let destination = cacheFile(videoId)
@@ -96,6 +97,8 @@ actor AudioCache {
                 }
             } catch {
                 lastError = error
+                // every client hears the same answer to a bot check
+                if error is BotCheckError { break }
             }
         }
         if let fallback { return .stream(fallback) }

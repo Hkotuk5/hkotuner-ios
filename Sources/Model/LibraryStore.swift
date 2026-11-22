@@ -166,6 +166,121 @@ final class LibraryStore: ObservableObject {
         for track in gone { LocalFiles.delete(track) }
     }
 
+    // MARK: artists
+
+    func isFollowed(_ id: String) -> Bool { library.artists.contains { $0.id == id } }
+
+    func toggleFollow(_ artist: FollowedArtist) {
+        if isFollowed(artist.id) {
+            change { $0.artists.removeAll { $0.id == artist.id } }
+        } else {
+            change { $0.artists.insert(artist, at: 0) }
+        }
+    }
+
+    func unfollow(at offsets: IndexSet) { change { $0.artists.remove(atOffsets: offsets) } }
+
+    // MARK: playlists that came from elsewhere
+
+    /// a shared, imported or found playlist kept as one of the listener's own
+    @discardableResult
+    func keep(_ shared: SharedPlaylist) -> String {
+        createPlaylist(shared.name, tracks: shared.tracks)
+    }
+
+    /// the YouTube Music account's likes and playlists, added to what is here.
+    /// An account playlist keeps its id ("yt-VL…"), so importing again updates it.
+    func importAccount(liked: [Track], playlists: [(id: String, name: String, tracks: [Track])]) -> (liked: Int, created: Int, updated: Int) {
+        var likedAdded = 0
+        var created = 0
+        var updated = 0
+        change { lib in
+            let known = Set(lib.liked.map(\.id))
+            let fresh = liked.filter { !known.contains($0.id) }
+            likedAdded = fresh.count
+            // an empty library takes the account's order; otherwise new likes go after the ones here
+            if lib.liked.isEmpty { lib.liked = fresh } else { lib.liked.append(contentsOf: fresh) }
+            for p in playlists {
+                let id = "yt-\(p.id)"
+                if let i = lib.playlists.firstIndex(where: { $0.id == id }) {
+                    let theirs = Set(p.tracks.map(\.id))
+                    let mine = lib.playlists[i].tracks.filter { !theirs.contains($0.id) }
+                    lib.playlists[i].tracks = p.tracks + mine
+                    lib.playlists[i].name = p.name
+                    updated += 1
+                } else {
+                    lib.playlists.append(Playlist(id: id, name: String(p.name.prefix(100)), tracks: p.tracks, createdAt: Self.nowMs()))
+                    created += 1
+                }
+            }
+        }
+        return (likedAdded, created, updated)
+    }
+
+    // MARK: playlist covers (a picture of the listener's own, on this phone)
+
+    static let coversDir: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("covers", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    @Published private(set) var coverVersion = 0
+
+    func coverURL(_ playlistId: String) -> URL? {
+        let url = Self.coversDir.appendingPathComponent("\(Self.safeName(playlistId)).jpg")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    func setCover(_ playlistId: String, jpeg: Data?) {
+        let url = Self.coversDir.appendingPathComponent("\(Self.safeName(playlistId)).jpg")
+        if let jpeg {
+            try? jpeg.write(to: url, options: .atomic)
+        } else {
+            try? FileManager.default.removeItem(at: url)
+        }
+        coverVersion += 1
+    }
+
+    private static func safeName(_ id: String) -> String {
+        String(id.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "_" }.prefix(120))
+    }
+
+    // MARK: a copy each week in Files → hkotuner → Backups
+
+    static var backupsDir: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Backups", isDirectory: true)
+    }
+
+    var autoBackup: Bool {
+        get { UserDefaults.standard.object(forKey: "autoBackup") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "autoBackup"); objectWillChange.send() }
+    }
+
+    var lastAutoBackup: Date? { UserDefaults.standard.object(forKey: "autoBackup.at") as? Date }
+
+    func autoBackupIfDue() {
+        guard autoBackup, !(library.liked.isEmpty && library.playlists.isEmpty) else { return }
+        if let last = lastAutoBackup, Date().timeIntervalSince(last) < 7 * 86400 { return }
+        do {
+            let made = try exportBackup()
+            let dir = Self.backupsDir
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let target = dir.appendingPathComponent(made.lastPathComponent)
+            try? FileManager.default.removeItem(at: target)
+            try FileManager.default.moveItem(at: made, to: target)
+            UserDefaults.standard.set(Date(), forKey: "autoBackup.at")
+            // the four newest are enough
+            let old = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+                .filter { $0.hasPrefix("hkotuner-iphone-") && $0.hasSuffix(".json") }
+                .sorted().dropLast(4)
+            for name in old { try? FileManager.default.removeItem(at: dir.appendingPathComponent(name)) }
+        } catch {
+            lastError = "Автокопия не сохранилась: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: moving between the phone and the computer
 
     /// a desktop backup (Настройки → Данные) or its library.json, added to what is here;
