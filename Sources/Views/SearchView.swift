@@ -52,17 +52,6 @@ struct SearchView: View {
                     error = nil
                 }
             }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if !searched.isEmpty || searching {
-                    Picker("Что искать", selection: $scope) {
-                        ForEach(Scope.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(.bar)
-                }
-            }
             .sheet(item: Binding(get: { linkImport.map(LinkText.init) }, set: { linkImport = $0?.text })) { link in
                 LinkImportView(link: link.text)
             }
@@ -101,7 +90,20 @@ struct SearchView: View {
         }
     }
 
+    /// the kinds of results, as the first row of the list (an inset at the
+    /// top slid under the iOS 26 search field)
+    private var scopePicker: some View {
+        Picker("Что искать", selection: $scope) {
+            ForEach(Scope.allCases) { Text($0.rawValue).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+    }
+
     @ViewBuilder private var results: some View {
+        scopePicker
         if searching {
             ProgressView().frame(maxWidth: .infinity).padding().listRowBackground(Color.clear)
         } else if let error {

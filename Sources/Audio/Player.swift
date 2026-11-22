@@ -407,7 +407,7 @@ final class Player: ObservableObject {
         failures += 1
         if error is BotCheckError {
             // what is on the phone still plays; the rest waits for another network
-            message = error.localizedDescription
+            message = "«\(track.title)» YouTube сейчас не отдал. " + (error.localizedDescription)
             if let i = queue.indices.dropFirst(index + 1).first(where: { Player.isOnPhone(queue[$0]) }) {
                 index = i
                 load()

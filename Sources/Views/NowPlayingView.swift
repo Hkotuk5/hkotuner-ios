@@ -1,49 +1,64 @@
 import SwiftUI
 
+/// The song on the whole screen: cover (swipe it for the next or previous
+/// song), lyrics or the queue in its place, a scrubber and the controls.
 struct NowPlayingView: View {
     enum Pane { case cover, lyrics, queue }
 
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var player: Player
     @EnvironmentObject private var library: LibraryStore
     @ObservedObject private var audio = AudioSettings.shared
-    @State private var scrub: Double?
     @State private var picking = false
     @State private var pane = Pane.cover
     @State private var showEqualizer = false
     @State private var showArtist = false
+    @State private var swipe: CGFloat = 0
 
     var body: some View {
-        ZStack {
-            background
+        VStack(spacing: 0) {
+            topBar
             if let track = player.current {
-                VStack(spacing: 18) {
-                    Capsule().fill(Theme.muted).frame(width: 40, height: 5).padding(.top, 8)
+                Group {
                     switch pane {
                     case .cover:
-                        Spacer(minLength: 0)
-                        Artwork(url: track.thumbnailURL, size: nil, radius: 18)
-                            .frame(maxWidth: 340)
-                            .scaleEffect(player.isPlaying ? 1 : 0.9)
-                            .animation(.spring(response: 0.45, dampingFraction: 0.75), value: player.isPlaying)
-                            .shadow(color: .black.opacity(0.5), radius: 28, y: 14)
-                            .padding(.horizontal, 8)
-                        Spacer(minLength: 0)
+                        cover(track)
                     case .lyrics:
-                        LyricsPane(track: track)
+                        VStack(spacing: 0) {
+                            compactHeader(track)
+                            LyricsPane(track: track)
+                        }
                     case .queue:
-                        QueuePane()
+                        VStack(spacing: 0) {
+                            compactHeader(track)
+                            QueuePane()
+                        }
                     }
-                    titleRow(track)
-                    progress
-                    controls
-                    bottomBar(track)
                 }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 12)
+                .frame(maxHeight: .infinity)
+                if pane == .cover { titleRow(track).padding(.top, 20) }
+                Scrubber(
+                    position: player.position,
+                    length: player.length,
+                    note: !player.throughEngine && track.isYouTube && !player.isLoading ? "поток" : nil,
+                    onSeek: { player.seek(to: $0) }
+                )
+                .padding(.top, 14)
+                .disabled(player.length <= 0)
+                controls.padding(.top, 6)
+                bottomBar(track).padding(.top, 18)
             } else {
                 EmptyNote(icon: "music.note", title: "Ничего не играет")
+                    .frame(maxHeight: .infinity)
             }
         }
+        .padding(.horizontal, 24)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // the blurred cover stays behind and never widens the layout
+        .background { backdrop }
+        .overlay(alignment: .top) { Toast() }
+        .presentationDragIndicator(.hidden)
         .sheet(isPresented: $picking) {
             if let track = player.current { PlaylistPicker(tracks: [track]) }
         }
@@ -64,95 +79,166 @@ struct NowPlayingView: View {
         }
     }
 
-    private var background: some View {
+    // MARK: parts
+
+    private var backdrop: some View {
         ZStack {
             Theme.background
-            if let url = player.current?.thumbnailURL {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image.resizable().scaledToFill()
-                    } else {
-                        Color.clear
+            Color.clear
+                .overlay {
+                    if let url = player.current?.thumbnailURL {
+                        AsyncImage(url: url) { phase in
+                            if let image = phase.image {
+                                image.resizable().scaledToFill()
+                            } else {
+                                Color.clear
+                            }
+                        }
+                        .blur(radius: 80)
+                        .opacity(0.6)
                     }
                 }
-                .blur(radius: 70)
-                .opacity(0.55)
-                .scaleEffect(1.3)
-            }
-            LinearGradient(colors: [.clear, Theme.background.opacity(0.85)], startPoint: .center, endPoint: .bottom)
+                .clipped()
+            LinearGradient(
+                colors: [Theme.background.opacity(0.15), Theme.background.opacity(0.55), Theme.background.opacity(0.95)],
+                startPoint: .top, endPoint: .bottom
+            )
         }
         .ignoresSafeArea()
+        .animation(.easeInOut(duration: 0.6), value: player.current?.id)
+    }
+
+    private var topBar: some View {
+        HStack {
+            Button { dismiss() } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Свернуть")
+            Spacer()
+            VStack(spacing: 2) {
+                Text(player.isWave ? "Моя волна" : "Сейчас играет")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                if !player.isWave && player.queue.count > 1 {
+                    Text("\(player.index + 1) из \(player.queue.count)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(Theme.muted)
+                }
+            }
+            Spacer()
+            if let track = player.current {
+                moreMenu(track)
+            } else {
+                Color.clear.frame(width: 44, height: 44)
+            }
+        }
+        .foregroundStyle(Theme.ink)
+        .buttonStyle(.plain)
+        .padding(.horizontal, -10)
+        .padding(.top, 6)
+    }
+
+    private func cover(_ track: Track) -> some View {
+        GeometryReader { geo in
+            let side = max(0, min(geo.size.width, geo.size.height))
+            Artwork(url: track.thumbnailURL, size: side, radius: 22)
+                .scaleEffect(player.isPlaying || player.isLoading ? 1 : 0.86)
+                .shadow(color: .black.opacity(player.isPlaying ? 0.45 : 0.25), radius: 30, y: 16)
+                .offset(x: swipe)
+                .rotationEffect(.degrees(Double(swipe) / 40))
+                .opacity(1 - min(0.5, abs(Double(swipe)) / 400))
+                .animation(.spring(response: 0.45, dampingFraction: 0.78), value: player.isPlaying)
+                .frame(width: geo.size.width, height: geo.size.height)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 12)
+                        .onChanged { swipe = $0.translation.width }
+                        .onEnded { value in
+                            let dx = value.translation.width
+                            if dx < -90 { player.next() } else if dx > 90 { player.previous() }
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { swipe = 0 }
+                        }
+                )
+                .accessibilityLabel("Обложка")
+                .accessibilityHint("Смахни влево — следующая песня, вправо — предыдущая")
+        }
+        .padding(.top, 12)
+    }
+
+    /// a small cover and the names, above the lyrics or the queue
+    private func compactHeader(_ track: Track) -> some View {
+        HStack(spacing: 12) {
+            Artwork(url: track.thumbnailURL, size: 56, radius: 10)
+            names(track, big: false)
+            likeButton(track)
+        }
+        .padding(.vertical, 12)
     }
 
     private func titleRow(_ track: Track) -> some View {
         HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(track.title)
-                    .font(.title2.weight(.bold))
-                    .foregroundStyle(Theme.ink)
-                    .lineLimit(2)
-                Button { if track.isYouTube { showArtist = true } } label: {
-                    Text(track.artist)
-                        .font(.body)
-                        .foregroundStyle(Theme.muted)
-                        .lineLimit(1)
-                }
-                .buttonStyle(.plain)
-            }
-            Spacer()
-            Button { library.toggleLike(track) } label: {
-                Image(systemName: library.isLiked(track) ? "heart.fill" : "heart")
-                    .font(.title2)
-                    .foregroundStyle(library.isLiked(track) ? Theme.accent : Theme.ink)
-                    .frame(width: 44, height: 44)
-            }
-            .accessibilityLabel(library.isLiked(track) ? "Убрать из любимых" : "В любимые")
+            names(track, big: true)
+            likeButton(track)
         }
     }
 
-    private var progress: some View {
-        VStack(spacing: 4) {
-            Slider(
-                value: Binding(
-                    get: { scrub ?? player.position },
-                    set: { scrub = $0 }
-                ),
-                in: 0...max(player.length, 1),
-                onEditingChanged: { editing in
-                    if !editing, let target = scrub {
-                        player.seek(to: target)
-                        scrub = nil
-                    }
-                }
-            )
-            HStack {
-                Text(Track.clock(scrub ?? player.position))
-                Spacer()
-                if !player.throughEngine && player.current?.isYouTube == true && !player.isLoading {
-                    Text("поток").font(.caption2.weight(.semibold)).foregroundStyle(Theme.muted)
-                }
-                Spacer()
-                Text("-" + Track.clock(max(0, player.length - (scrub ?? player.position))))
+    private func names(_ track: Track, big: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(track.title)
+                .font(big ? .title2.weight(.bold) : .headline)
+                .foregroundStyle(Theme.ink)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Button { if track.isYouTube { showArtist = true } } label: {
+                Text(track.artist)
+                    .font(big ? .body : .subheadline)
+                    .foregroundStyle(Theme.muted)
+                    .lineLimit(1)
             }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(Theme.muted)
+            .buttonStyle(.plain)
+            .disabled(!track.isYouTube)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func likeButton(_ track: Track) -> some View {
+        let liked = library.isLiked(track)
+        return Button {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { library.toggleLike(track) }
+        } label: {
+            Image(systemName: liked ? "heart.fill" : "heart")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(liked ? Theme.accent : Theme.ink)
+                .scaleEffect(liked ? 1.08 : 1)
+                .frame(width: 44, height: 44)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(liked ? "Убрать из любимых" : "В любимые")
     }
 
     private var controls: some View {
-        HStack {
+        HStack(spacing: 0) {
             Button { player.cycleRepeat() } label: {
                 Image(systemName: player.repeatMode == .one ? "repeat.1" : "repeat")
+                    .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(player.repeatMode == .off ? Theme.muted : Theme.accent)
+                    .frame(width: 44, height: 44)
             }
             .accessibilityLabel(repeatLabel)
-            Spacer()
-            Button { player.previous() } label: { Image(systemName: "backward.fill").font(.title) }
-                .accessibilityLabel("Предыдущий")
-            Spacer()
+            Spacer(minLength: 0)
+            Button { player.previous() } label: {
+                Image(systemName: "backward.fill")
+                    .font(.system(size: 28))
+                    .frame(width: 56, height: 56)
+            }
+            .accessibilityLabel("Предыдущий")
+            Spacer(minLength: 0)
             Button { player.toggle() } label: {
                 ZStack {
-                    Circle().fill(Theme.accent).frame(width: 76, height: 76)
+                    Circle().fill(Theme.accent)
                     if player.isLoading {
                         ProgressView().tint(.black)
                     } else {
@@ -162,19 +248,26 @@ struct NowPlayingView: View {
                             .offset(x: player.isPlaying ? 0 : 2)
                     }
                 }
+                .frame(width: 74, height: 74)
+                .shadow(color: Theme.accent.opacity(0.35), radius: 16, y: 6)
             }
             .accessibilityLabel(player.isPlaying ? "Пауза" : "Играть")
-            Spacer()
-            Button { player.next() } label: { Image(systemName: "forward.fill").font(.title) }
-                .accessibilityLabel("Следующий")
-            Spacer()
+            Spacer(minLength: 0)
+            Button { player.next() } label: {
+                Image(systemName: "forward.fill")
+                    .font(.system(size: 28))
+                    .frame(width: 56, height: 56)
+            }
+            .accessibilityLabel("Следующий")
+            Spacer(minLength: 0)
             Button { player.autoContinue.toggle() } label: {
                 Image(systemName: "infinity")
+                    .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(player.autoContinue ? Theme.accent : Theme.muted)
+                    .frame(width: 44, height: 44)
             }
             .accessibilityLabel(player.autoContinue ? "Похожие после очереди: включено" : "Похожие после очереди: выключено")
         }
-        .font(.title3)
         .foregroundStyle(Theme.ink)
         .buttonStyle(.plain)
     }
@@ -188,9 +281,8 @@ struct NowPlayingView: View {
     }
 
     private func bottomBar(_ track: Track) -> some View {
-        HStack {
+        HStack(spacing: 0) {
             paneButton(.lyrics, "quote.bubble", "Текст")
-            Spacer()
             Menu {
                 if player.sleepAt != nil || player.sleepAfterTrack {
                     Button(role: .destructive) { player.cancelSleep() } label: { Label("Выключить таймер", systemImage: "xmark") }
@@ -200,37 +292,27 @@ struct NowPlayingView: View {
                 }
                 Button("Когда закончится песня") { player.sleepAtTrackEnd() }
             } label: {
-                sleepLabel
+                barItem(active: player.sleepAt != nil || player.sleepAfterTrack) { sleepLabel }
             }
-            Spacer()
+            .accessibilityLabel("Таймер сна")
             Button { showEqualizer = true } label: {
-                Image(systemName: "slider.vertical.3")
-                    .foregroundStyle(audio.eqOn ? Theme.accent : Theme.ink)
+                barItem(active: audio.eqOn) { Image(systemName: "slider.vertical.3") }
             }
             .accessibilityLabel("Эквалайзер")
-            Spacer()
-            Menu {
-                Button { picking = true } label: { Label("В плейлист…", systemImage: "text.badge.plus") }
-                if track.isYouTube {
-                    Button { player.playSingle(track) } label: { Label("Похожие треки", systemImage: "dot.radiowaves.left.and.right") }
-                    if let link = URL(string: track.url) {
-                        ShareLink(item: link) { Label("Поделиться", systemImage: "square.and.arrow.up") }
-                    }
-                    Button(role: .destructive) {
-                        library.toggleDislike(track)
-                        player.next()
-                    } label: { Label("Не нравится", systemImage: "hand.thumbsdown") }
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-            .accessibilityLabel("Ещё")
-            Spacer()
             paneButton(.queue, "list.bullet", "Очередь")
         }
-        .font(.title3)
+        .font(.system(size: 18, weight: .medium))
         .foregroundStyle(Theme.ink)
         .buttonStyle(.plain)
+        .padding(.vertical, 4)
+        .glassCard(radius: 26)
+    }
+
+    private func barItem<Content: View>(active: Bool, @ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .foregroundStyle(active ? Theme.accent : Theme.ink)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .contentShape(Rectangle())
     }
 
     @ViewBuilder private var sleepLabel: some View {
@@ -239,10 +321,8 @@ struct NowPlayingView: View {
                 Image(systemName: "moon.zzz.fill")
                 Text(at, style: .timer).font(.caption.monospacedDigit())
             }
-            .foregroundStyle(Theme.accent)
         } else {
             Image(systemName: player.sleepAfterTrack ? "moon.zzz.fill" : "moon.zzz")
-                .foregroundStyle(player.sleepAfterTrack ? Theme.accent : Theme.ink)
         }
     }
 
@@ -250,10 +330,90 @@ struct NowPlayingView: View {
         Button {
             withAnimation(.easeInOut(duration: 0.25)) { pane = pane == which ? .cover : which }
         } label: {
-            Image(systemName: icon)
-                .foregroundStyle(pane == which ? Theme.accent : Theme.ink)
+            barItem(active: pane == which) { Image(systemName: icon) }
         }
         .accessibilityLabel(label)
+    }
+
+    private func moreMenu(_ track: Track) -> some View {
+        Menu {
+            Button { picking = true } label: { Label("В плейлист…", systemImage: "text.badge.plus") }
+            if track.isYouTube {
+                Button { showArtist = true } label: { Label("Исполнитель", systemImage: "person") }
+                Button { player.playSingle(track) } label: { Label("Похожие треки", systemImage: "dot.radiowaves.left.and.right") }
+                if let link = URL(string: track.url) {
+                    ShareLink(item: link) { Label("Поделиться", systemImage: "square.and.arrow.up") }
+                }
+                Button(role: .destructive) {
+                    library.toggleDislike(track)
+                    player.next()
+                } label: { Label("Не нравится", systemImage: "hand.thumbsdown") }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 18, weight: .semibold))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Ещё")
+    }
+}
+
+/// A thick progress line: drag anywhere on it to move through the song.
+struct Scrubber: View {
+    let position: Double
+    let length: Double
+    var note: String? = nil
+    let onSeek: (Double) -> Void
+    @State private var dragged: Double?
+
+    var body: some View {
+        let value = dragged ?? position
+        let fraction = length > 0 ? min(1, max(0, value / length)) : 0
+        VStack(spacing: 6) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Theme.ink.opacity(0.18))
+                    Capsule().fill(dragged == nil ? Theme.ink.opacity(0.85) : Theme.accent)
+                        .frame(width: geo.size.width * fraction)
+                }
+                .frame(height: dragged == nil ? 6 : 12)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { drag in
+                            guard length > 0, geo.size.width > 0 else { return }
+                            dragged = min(1, max(0, drag.location.x / geo.size.width)) * length
+                        }
+                        .onEnded { _ in
+                            if let target = dragged { onSeek(target) }
+                            dragged = nil
+                        }
+                )
+                .animation(.spring(response: 0.25, dampingFraction: 0.8), value: dragged == nil)
+            }
+            .frame(height: 22)
+            HStack {
+                Text(Track.clock(value))
+                Spacer()
+                if let note { Text(note).font(.caption2.weight(.semibold)) }
+                Spacer()
+                Text("-" + Track.clock(max(0, length - value)))
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(Theme.muted)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Позиция в песне")
+        .accessibilityValue("\(Track.clock(value)) из \(Track.clock(length))")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: onSeek(min(length, position + 15))
+            case .decrement: onSeek(max(0, position - 15))
+            @unknown default: break
+            }
+        }
     }
 }
 
