@@ -79,6 +79,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          notes="notes/$GITHUB_REF_NAME.md"
+          if [ ! -f "$notes" ]; then
+            notes=$(mktemp)
+            echo "Unsigned build for sideloading with Sideloadly, AltStore or SideStore. See УСТАНОВКА.md." > "$notes"
+          fi
           gh release create "$GITHUB_REF_NAME" hkotuner.ipa hkotuner.ipa.sha256 \
             --title "hkotuner for iPhone $GITHUB_REF_NAME" \
-            --notes "Unsigned build for sideloading with Sideloadly, AltStore or SideStore. See УСТАНОВКА.md."
+            --notes-file "$notes"
