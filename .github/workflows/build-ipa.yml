@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      resolver_probe:
+        description: Test embedded yt-dlp on the iOS simulator
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -15,7 +20,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  resolver-probe:
+    if: ${{ inputs.resolver_probe }}
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the resolver on iOS
+        run: bash tools/run-ios-resolver-probe.sh
+
   ipa:
+    if: ${{ !inputs.resolver_probe }}
     runs-on: macos-latest
     timeout-minutes: 40
     steps:
