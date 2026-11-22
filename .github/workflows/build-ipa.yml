@@ -1,0 +1,84 @@
+name: Build iPhone app
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Generate the Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Unit tests (simulator)
+        run: |
+          SIM=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          for runtime, items in sorted(devices.items(), reverse=True):
+              if "iOS" not in runtime:
+                  continue
+              for d in items:
+                  if d["name"].startswith("iPhone"):
+                      print(d["udid"]); sys.exit()
+          ')
+          echo "Simulator: $SIM"
+          xcodebuild test \
+            -project hkotuner.xcodeproj -scheme hkotuner \
+            -destination "id=$SIM" \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee test.log | grep -E "^(Test Suite|Test Case.*(passed|failed)|.*error:)|\*\* TEST" || true
+          grep -q "\*\* TEST SUCCEEDED \*\*" test.log
+
+      - name: Build the unsigned .ipa
+        run: |
+          xcodebuild build \
+            -project hkotuner.xcodeproj -scheme hkotuner \
+            -configuration Release -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            | tee build.log | grep -E "error:|\*\* BUILD" || true
+          grep -q "\*\* BUILD SUCCEEDED \*\*" build.log
+          rm -rf Payload && mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/hkotuner.app Payload/
+          zip -qry hkotuner.ipa Payload
+          ls -lh hkotuner.ipa
+          shasum -a 256 hkotuner.ipa | tee hkotuner.ipa.sha256
+
+      - name: Keep the .ipa (Actions → this run → Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: hkotuner-ipa
+          path: |
+            hkotuner.ipa
+            hkotuner.ipa.sha256
+          retention-days: 30
+
+      - name: Publish a release for a v* tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" hkotuner.ipa hkotuner.ipa.sha256 \
+            --title "hkotuner for iPhone $GITHUB_REF_NAME" \
+            --notes "Unsigned build for sideloading with Sideloadly, AltStore or SideStore. See УСТАНОВКА.md."
