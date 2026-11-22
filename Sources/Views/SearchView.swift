@@ -22,7 +22,17 @@ struct SearchView: View {
     var body: some View {
         NavigationStack {
             List {
-                if !query.isEmpty, LinkImport.kind(of: query) != nil {
+                if let stream = Track.audioStream(from: query) {
+                    Section {
+                        Button { player.playSingle(stream) } label: {
+                            Label("Воспроизвести аудиопоток", systemImage: "play.circle")
+                                .font(.headline)
+                        }
+                    } footer: {
+                        Text(stream.artist)
+                    }
+                    .listRowBackground(Theme.surface)
+                } else if !query.isEmpty, LinkImport.kind(of: query) != nil {
                     Section {
                         Button { linkImport = query } label: {
                             Label("Открыть плейлист по ссылке", systemImage: "link")
@@ -61,7 +71,7 @@ struct SearchView: View {
     @ViewBuilder private var startPage: some View {
         if recent.isEmpty {
             EmptyNote(icon: "magnifyingglass", title: "Найди что угодно",
-                      text: "Песни, исполнители, альбомы и плейлисты YouTube Music. Можно вставить ссылку на плейлист из YouTube или Spotify — он перенесётся сюда.")
+                      text: "Песни, исполнители, альбомы и плейлисты YouTube Music. Можно вставить ссылку на плейлист или прямую HTTPS-ссылку на MP3, M4A или HLS (.m3u8).")
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
         } else {
@@ -131,6 +141,10 @@ struct SearchView: View {
     private func run() {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
+        if let stream = Track.audioStream(from: q) {
+            player.playSingle(stream)
+            return
+        }
         if LinkImport.kind(of: q) != nil {
             linkImport = q
             return

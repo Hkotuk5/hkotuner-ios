@@ -28,6 +28,8 @@ struct HkotunerApp: App {
                     if now == .background {
                         player.saveSession()
                         StatsStore.shared.save()
+                    } else if now == .active {
+                        player.refreshWebPlaybackState()
                     }
                 }
         }

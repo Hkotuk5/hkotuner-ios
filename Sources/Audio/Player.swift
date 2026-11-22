@@ -44,7 +44,7 @@ final class Player: ObservableObject {
     private let stream = AVPlayer()
     private let web = WebPlayer.shared
     private enum Backend { case none, engine, stream, web }
-    /// after YouTube refused the app, songs go straight to its page for a while
+    /// After a bot check or rate limit, give direct playback a break.
     private var webUntil: Date?
     private var backend = Backend.none
 
@@ -67,6 +67,7 @@ final class Player: ObservableObject {
 
     private init() {
         stream.automaticallyWaitsToMinimizeStalling = true
+        stream.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: .longFormAudio)
 
         engine.onFinish = { [weak self] in self?.finished() }
@@ -262,7 +263,6 @@ final class Player: ObservableObject {
             stream.play()
         case .web:
             web.setPlaying(true)
-            isPlaying = true
         case .none:
             toggle()
             return
@@ -277,7 +277,7 @@ final class Player: ObservableObject {
         } else if repeatMode == .all && !queue.isEmpty {
             index = 0
             load()
-        } else if autoContinue {
+        } else if autoContinue && !queue.allSatisfy(\.isAudioStream) {
             Task {
                 await self.extend()
                 if self.index + 1 < self.queue.count {
@@ -391,7 +391,9 @@ final class Player: ObservableObject {
             } catch {
                 guard !Task.isCancelled, self.current?.id == track.id else { return }
                 if self.pageHelps(track, after: error) {
-                    self.webUntil = Date().addingTimeInterval(30 * 60)
+                    if error is BotCheckError || (error as? HTTPStatusError)?.code == 429 {
+                        self.webUntil = Date().addingTimeInterval(30 * 60)
+                    }
                     self.startWeb(track, at: startAt)
                     return
                 }
@@ -402,7 +404,7 @@ final class Player: ObservableObject {
 
     // MARK: YouTube's own page
 
-    /// straight to the page: always, or while YouTube keeps refusing the app
+    /// Straight to the page in Always mode or during a direct playback cooldown.
     private func pageFirst(for track: Track) -> Bool {
         guard track.isYouTube, !Player.isOnPhone(track) else { return false }
         switch WebPlayer.mode {
@@ -435,20 +437,27 @@ final class Player: ObservableObject {
         }
     }
 
+    func refreshWebPlaybackState() {
+        guard backend == .web else { return }
+        web.refreshPlaybackState()
+    }
+
     private func webState(_ state: WebPlayer.State) {
         guard backend == .web else { return }
         webAd = state.ad
-        if state.ad { return }
-        position = state.time
-        if state.duration > 0, abs(state.duration - length) > 0.5 { length = state.duration }
+        if !state.ad {
+            position = state.time
+            if state.duration > 0, abs(state.duration - length) > 0.5 { length = state.duration }
+        }
         let playing = !state.paused
-        if isLoading && playing && state.time > 0 {
+        if isLoading && playing && !state.ad && state.time > 0 {
             isLoading = false
             failures = 0
         }
         if playing != isPlaying {
             isPlaying = playing
             updateNowPlaying()
+            if !playing { saveSession() }
         }
     }
 
@@ -516,7 +525,7 @@ final class Player: ObservableObject {
         return AudioCache.localFile(id) != nil
     }
 
-    /// a file that cannot be decoded never reaches its end: move on, and drop the bad copy
+    /// An item can fail before it reaches its end. Drop a bad cached copy or allow a direct link to be retried.
     private func watch(_ item: AVPlayerItem, track: Track) {
         itemStatus = item.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
@@ -524,7 +533,14 @@ final class Player: ObservableObject {
                 guard status == .failed else { return }
                 let reason = item?.error?.localizedDescription ?? "ошибка воспроизведения"
                 Task { @MainActor in
-                    guard let self, self.current?.id == track.id else { return }
+                    guard let self, let item, item === self.stream.currentItem, self.current?.id == track.id else { return }
+                    if track.isAudioStream {
+                        self.stopBackends()
+                        self.resumeAt = self.position
+                        self.updateNowPlaying()
+                        self.failed(track, HKError(reason))
+                        return
+                    }
                     if let id = track.videoId, !AudioCache.isOffline(id) {
                         try? FileManager.default.removeItem(at: AudioCache.cacheFile(id))
                     }
@@ -535,6 +551,10 @@ final class Player: ObservableObject {
     }
 
     private static func source(for track: Track) async throws -> PlaybackSource {
+        if track.isAudioStream {
+            guard let url = track.audioStreamURL else { throw HKError("нужна прямая HTTPS-ссылка на аудио") }
+            return .stream(url)
+        }
         if track.isLocal {
             let file = LocalFiles.fileURL(track)
             guard FileManager.default.fileExists(atPath: file.path) else { throw HKError("файла больше нет на телефоне") }
@@ -633,7 +653,7 @@ final class Player: ObservableObject {
                 setFade(sleepFade)
             }
         }
-        guard isPlaying, let track = current else { return }
+        guard isPlaying, !webAd, let track = current else { return }
         listened += delta
         StatsStore.shared.listen(track, seconds: delta)
         if !counted && listened >= min(30, max(10, length * 0.5)) {

@@ -137,6 +137,31 @@ final class ShareTests: XCTestCase {
     }
 }
 
+final class AudioStreamTests: XCTestCase {
+    func testDirectAudioLinks() throws {
+        let address = "https://audio.example.org/Music%20Track.M4A?key=a%2Bb"
+        let track = try XCTUnwrap(Track.audioStream(from: " \(address)#player\n"))
+        XCTAssertTrue(track.isAudioStream)
+        XCTAssertEqual(track.title, "Music Track")
+        XCTAssertEqual(track.artist, "audio.example.org")
+        XCTAssertEqual(track.audioStreamURL?.absoluteString, address)
+        XCTAssertEqual(track.id, Track.audioStream(from: address)?.id)
+        let restored = try JSONDecoder().decode(Track.self, from: JSONEncoder().encode(track))
+        XCTAssertEqual(restored.audioStreamURL, track.audioStreamURL)
+
+        XCTAssertNotNil(Track.audioStream(from: "https://audio.example.org/song.mp3"))
+        XCTAssertNotNil(Track.audioStream(from: "https://audio.example.org/live.m3u8"))
+    }
+
+    func testDirectAudioLinksRejectWebPagesAndUnsupportedAddresses() {
+        XCTAssertNil(Track.audioStream(from: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
+        XCTAssertNil(Track.audioStream(from: "https://audio.example.org/page?file=track.mp3"))
+        XCTAssertNil(Track.audioStream(from: "https://user:password@audio.example.org/song.mp3"))
+        XCTAssertNil(Track.audioStream(from: "http://audio.example.org/song.mp3"))
+        XCTAssertNil(Track.audioStream(from: "file:///music/song.mp3"))
+    }
+}
+
 final class AccountAndLyricsTests: XCTestCase {
     func testSapisidHash() {
         XCTAssertEqual(YTAuth.hash(sapisid: "abcDEF/123", time: 1_700_000_000, origin: "https://music.youtube.com"),

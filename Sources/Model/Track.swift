@@ -1,9 +1,10 @@
+import CryptoKit
 import Foundation
 
 /// One song, in the same JSON shape as the desktop app's `Track`
 /// (crates/hk-core/src/catalog.rs), so libraries move between them.
 struct Track: Codable, Hashable, Identifiable {
-    /// "yt:<video id>" or "local:<file name>"
+    /// A stable identifier for a catalog track, local file or direct audio link.
     var id: String
     var source: String
     var title: String
@@ -11,13 +12,15 @@ struct Track: Codable, Hashable, Identifiable {
     var album: String?
     var duration: Double?
     var thumbnail: String?
-    /// the track's own page (YouTube) or the file name under Documents/Music (local)
+    /// A catalog page, a local file name or a direct audio URL.
     var url: String
     var artistId: String?
     var composer: String?
 
     var isYouTube: Bool { source == "youtube" && videoId != nil }
     var isLocal: Bool { source == "local" }
+    var isAudioStream: Bool { source == "stream" }
+    var audioStreamURL: URL? { isAudioStream ? Self.directAudioURL(url) : nil }
 
     /// the 11 characters after "yt:"
     var videoId: String? {
@@ -49,6 +52,26 @@ struct Track: Codable, Hashable, Identifiable {
               duration: duration,
               thumbnail: thumbnail ?? "https://i.ytimg.com/vi/\(id)/hqdefault.jpg",
               url: "https://www.youtube.com/watch?v=\(id)", artistId: artistId, composer: nil)
+    }
+
+    static func audioStream(from text: String) -> Track? {
+        guard let url = directAudioURL(text), let host = url.host else { return nil }
+        let address = url.absoluteString
+        let digest = SHA256.hash(data: Data(address.utf8))
+        let id = "stream:" + Data(digest).base64EncodedString()
+        let title = url.deletingPathExtension().lastPathComponent
+        return Track(id: id, source: "stream", title: title.isEmpty ? host : title, artist: host,
+                     album: nil, duration: nil, thumbnail: nil,
+                     url: address, artistId: nil, composer: nil)
+    }
+
+    private static func directAudioURL(_ text: String) -> URL? {
+        let address = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var parts = URLComponents(string: address), parts.scheme?.lowercased() == "https",
+              let host = parts.host, !host.isEmpty, parts.user == nil, parts.password == nil else { return nil }
+        parts.fragment = nil
+        guard let url = parts.url, ["mp3", "m4a", "m3u8"].contains(url.pathExtension.lowercased()) else { return nil }
+        return url
     }
 }
 

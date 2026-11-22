@@ -333,6 +333,11 @@ final class LibraryStore: ObservableObject {
     func exportBackup() throws -> URL {
         var lib = library
         lib.local = []
+        lib.liked.removeAll(where: \.isAudioStream)
+        lib.history.removeAll(where: \.isAudioStream)
+        for index in lib.playlists.indices {
+            lib.playlists[index].tracks.removeAll(where: \.isAudioStream)
+        }
         let libraryJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(lib))
         let backup: [String: Any] = [
             "kind": "hkotuner-backup",

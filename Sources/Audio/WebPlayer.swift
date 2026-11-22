@@ -77,6 +77,11 @@ final class WebPlayer: NSObject {
             : "if (window.__hk) { window.__hk.want = false; } var v = document.querySelector('video'); if (v) { v.pause(); }")
     }
 
+    func refreshPlaybackState() {
+        guard expected != nil else { return }
+        run("window.__hk?.reportState();")
+    }
+
     func seek(to seconds: Double) {
         guard expected != nil, seconds.isFinite else { return }
         run("if (window.__hk) { window.__hk.endedSent = false; } var v = document.querySelector('video'); if (v) { v.currentTime = \(String(format: "%.2f", max(0, seconds))); }")
@@ -214,9 +219,8 @@ final class WebPlayer: NSObject {
         }
     }
 
-    /// runs on the page: keeps the <video> playing or paused as the app wants,
-    /// reports where it is twice a second, and stops at the end of the song
-    /// (the page would go on to its own next song)
+    /// Starts the selected video, reports its state, and stops at the end of
+    /// the song so the app can advance its own queue.
     static let pageScript = """
     (function () {
       if (window.__hk) { return; }
@@ -238,7 +242,7 @@ final class WebPlayer: NSObject {
         v.addEventListener('ended', function () { if (!isAd()) { finish('ended'); } });
         v.addEventListener('error', function () { post({ type: 'error', code: v.error ? v.error.code : 0 }); });
       }
-      setInterval(function () {
+      function update(allowAutoplay) {
         var id = currentId();
         if (hk.expected && id && id !== hk.expected) {
           if (hk.started) { finish('moved'); }
@@ -253,11 +257,17 @@ final class WebPlayer: NSObject {
           v.currentTime = hk.seekTo;
           hk.seekTo = null;
         }
-        if (hk.want && v.paused && !hk.endedSent) { v.play().catch(function () {}); }
+        // Retry only while starting a song on a visible page. Once the song
+        // starts, the page can pause it without the app requesting play again.
+        if (allowAutoplay && hk.want && v.paused && !hk.endedSent && !hk.started && !document.hidden) {
+          v.play().catch(function () {});
+        }
         if (!hk.want && !v.paused) { v.pause(); }
         if (!v.paused && !ad && v.currentTime > 0) { hk.started = true; }
         post({ type: 'state', found: true, time: v.currentTime || 0, duration: duration, paused: v.paused, ad: ad });
-      }, 500);
+      }
+      hk.reportState = function () { update(false); };
+      setInterval(function () { update(true); }, 500);
     })();
     """
 }
