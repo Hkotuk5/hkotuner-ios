@@ -137,6 +137,24 @@ final class ShareTests: XCTestCase {
     }
 }
 
+final class SoundCloudEmbedTests: XCTestCase {
+    func testRecognizesSoundCloudTrackAndPlaylistLinks() {
+        XCTAssertEqual(SoundCloudEmbed(" https://m.soundcloud.com/forss/flickermood#home ")?.url.host,
+                       "soundcloud.com")
+        XCTAssertNotNil(SoundCloudEmbed("https://soundcloud.com/artist/sets/playlist"))
+        XCTAssertNotNil(SoundCloudEmbed("https://on.soundcloud.com/example"))
+        XCTAssertNil(SoundCloudEmbed("https://soundcloud.com.example.org/artist/song"))
+        XCTAssertNil(SoundCloudEmbed("https://soundcloud.com/artist"))
+    }
+
+    func testLoadsOnlyTheOfficialPlayerFromOEmbed() {
+        let playerHTML = #"<iframe src="https://w.soundcloud.com/player/?url=track&amp;visual=true"></iframe>"#
+        XCTAssertEqual(SoundCloudEmbed.playerURL(in: playerHTML)?.query, "url=track&visual=true")
+        XCTAssertNil(SoundCloudEmbed.playerURL(in: #"<iframe src="https://example.org/player/"></iframe>"#))
+        XCTAssertNil(SoundCloudEmbed.playerURL(in: #"<iframe src="https://w.soundcloud.com/other/"></iframe>"#))
+    }
+}
+
 final class AudioStreamTests: XCTestCase {
     func testDirectAudioLinks() throws {
         let address = "https://audio.example.org/Music%20Track.M4A?key=a%2Bb"
