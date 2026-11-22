@@ -178,6 +178,16 @@ final class AccountAndLyricsTests: XCTestCase {
         XCTAssertFalse(Updates.newer("0.1.9", than: "0.2.0"))
     }
 
+    func testWebPlayerCookiesAndPages() {
+        let cookies = WebPlayer.cookies(from: "SAPISID=abc/123; PREF=f6=40000000&hl=ru; broken; =x")
+        XCTAssertEqual(cookies.map(\.name), ["SAPISID", "PREF"])
+        XCTAssertEqual(cookies[1].value, "f6=40000000&hl=ru")
+        XCTAssertEqual(cookies[0].domain, ".youtube.com")
+        XCTAssertTrue(cookies[0].isSecure)
+        XCTAssertEqual(WebPlayer.pageURL("dQw4w9WgXcQ", site: "music").absoluteString, "https://music.youtube.com/watch?v=dQw4w9WgXcQ")
+        XCTAssertEqual(WebPlayer.pageURL("dQw4w9WgXcQ", site: "youtube").absoluteString, "https://m.youtube.com/watch?v=dQw4w9WgXcQ")
+    }
+
     func testCardYear() {
         let card = MusicCard(id: "MPREb_x", kind: .album, title: "X", subtitle: "Single • 2025", thumbnail: nil)
         XCTAssertEqual(card.year, 2025)

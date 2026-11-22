@@ -139,6 +139,8 @@ final class YTAccount: ObservableObject {
             return false
         }
         isSignedIn = true
+        // YouTube's own page (WebPlayer) is signed in with the same account
+        WebPlayer.shared.adopt(cookieHeader: header)
         if let found = try? await YTMusic.accountName() {
             name = found
             UserDefaults.standard.set(found, forKey: "yt.accountName")
@@ -149,6 +151,7 @@ final class YTAccount: ObservableObject {
 
     func signOut() {
         YTAuth.clear()
+        WebPlayer.shared.signOut()
         isSignedIn = false
         name = nil
         UserDefaults.standard.removeObject(forKey: "yt.accountName")

@@ -18,6 +18,8 @@ struct SettingsView: View {
     @State private var configChecked: Date?
     @State private var signingIn = false
     @State private var confirmSignOut = false
+    @AppStorage("web.mode") private var webMode = "auto"
+    @AppStorage("web.site") private var webSite = "music"
 
     var body: some View {
         List {
@@ -27,6 +29,8 @@ struct SettingsView: View {
             }
 
             accountSection
+
+            webPlayerSection
 
             Section("Звук") {
                 NavigationLink { EqualizerView() } label: {
@@ -157,6 +161,31 @@ struct SettingsView: View {
             } catch {
                 note = error.localizedDescription
             }
+        }
+    }
+
+    /// YouTube's own page, for songs YouTube will not hand to the app
+    private var webPlayerSection: some View {
+        Section {
+            Picker("Когда играть через YouTube", selection: $webMode) {
+                Text("Если YouTube отказал").tag("auto")
+                Text("Всегда").tag("always")
+                Text("Никогда").tag("off")
+            }
+            Picker("Сайт", selection: $webSite) {
+                Text("YouTube Music").tag("music")
+                Text("YouTube").tag("youtube")
+            }
+            NavigationLink {
+                WebPlayerPage()
+            } label: {
+                Label("Открыть плеер YouTube", systemImage: "play.rectangle")
+            }
+            Button("Выйти на странице YouTube", role: .destructive) { WebPlayer.shared.signOut() }
+        } header: {
+            Text("Плеер YouTube")
+        } footer: {
+            Text("Когда YouTube просит подтвердить, что ты не бот, песня играет на его собственной странице, спрятанной за приложением. Открой плеер, войди там в аккаунт или пройди проверку — один раз. Такие песни играют без эквалайзера и не скачиваются, может быть реклама; без YouTube Premium музыка может вставать на паузу, когда экран заблокирован.")
         }
     }
 
@@ -322,5 +351,29 @@ struct EQBand: View {
             }
             Text(label).font(.caption2).foregroundStyle(Theme.muted)
         }
+    }
+}
+
+/// the hidden YouTube page on screen: sign in or answer YouTube here
+struct WebPlayerPage: View {
+    var body: some View {
+        WebPlayerScreen()
+            .ignoresSafeArea(edges: .bottom)
+            .navigationTitle("Плеер YouTube")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { WebPlayer.shared.reloadHome() } label: { Image(systemName: "house") }
+                        .accessibilityLabel("На главную YouTube")
+                }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Text("Это настоящая страница YouTube. Войди в аккаунт или пройди проверку — потом песни из приложения будут играть здесь.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.muted)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.bar)
+            }
     }
 }

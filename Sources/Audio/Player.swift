@@ -32,13 +32,20 @@ final class Player: ObservableObject {
     @Published private(set) var throughEngine = false
     @Published private(set) var sleepAt: Date?
     @Published private(set) var sleepAfterTrack = false
+    /// the song plays on YouTube's own page (WebPlayer), not through the app
+    @Published private(set) var viaWeb = false
+    /// YouTube's page is showing an ad
+    @Published private(set) var webAd = false
 
     var current: Track? { queue.indices.contains(index) ? queue[index] : nil }
     var upcoming: [Track] { queue.indices.contains(index + 1) ? Array(queue[(index + 1)...]) : [] }
 
     let engine = EnginePlayer()
     private let stream = AVPlayer()
-    private enum Backend { case none, engine, stream }
+    private let web = WebPlayer.shared
+    private enum Backend { case none, engine, stream, web }
+    /// after YouTube refused the app, songs go straight to its page for a while
+    private var webUntil: Date?
     private var backend = Backend.none
 
     private var ticker: Timer?
@@ -63,6 +70,16 @@ final class Player: ObservableObject {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: .longFormAudio)
 
         engine.onFinish = { [weak self] in self?.finished() }
+        web.onState = { [weak self] state in self?.webState(state) }
+        web.onEnded = { [weak self] in
+            guard let self, self.backend == .web else { return }
+            self.finished()
+        }
+        web.onError = { [weak self] reason in
+            guard let self, self.backend == .web, let track = self.current else { return }
+            self.stopBackends()
+            self.failed(track, HKError(reason))
+        }
         // not AudioSettings.apply(): that asks for Player.shared, which is being made right now
         engine.setEqualizer(on: AudioSettings.shared.eqOn, gains: AudioSettings.shared.gains)
 
@@ -218,6 +235,8 @@ final class Player: ObservableObject {
             if engine.isPlaying { pause() } else { resume() }
         case .stream:
             if stream.timeControlStatus == .paused { resume() } else { pause() }
+        case .web:
+            if isPlaying || isLoading { pause() } else { resume() }
         }
     }
 
@@ -225,6 +244,7 @@ final class Player: ObservableObject {
         switch backend {
         case .engine: engine.pause()
         case .stream: stream.pause()
+        case .web: web.setPlaying(false)
         case .none: break
         }
         isPlaying = false
@@ -240,6 +260,9 @@ final class Player: ObservableObject {
             isPlaying = true
         case .stream:
             stream.play()
+        case .web:
+            web.setPlaying(true)
+            isPlaying = true
         case .none:
             toggle()
             return
@@ -284,6 +307,7 @@ final class Player: ObservableObject {
         switch backend {
         case .engine: engine.seek(to: seconds)
         case .stream: stream.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        case .web: web.seek(to: seconds)
         case .none: resumeAt = seconds
         }
         updateNowPlaying()
@@ -342,6 +366,11 @@ final class Player: ObservableObject {
         updateNowPlaying()
         saveSession()
 
+        if pageFirst(for: track) {
+            startWeb(track, at: startAt)
+            return
+        }
+
         // a song changed on the lock screen must finish loading in the background
         let background = UIApplication.shared.beginBackgroundTask(withName: "hkotuner.load")
         loadTask = Task {
@@ -361,8 +390,65 @@ final class Player: ObservableObject {
                 }
             } catch {
                 guard !Task.isCancelled, self.current?.id == track.id else { return }
+                if self.pageHelps(track, after: error) {
+                    self.webUntil = Date().addingTimeInterval(30 * 60)
+                    self.startWeb(track, at: startAt)
+                    return
+                }
                 self.failed(track, error)
             }
+        }
+    }
+
+    // MARK: YouTube's own page
+
+    /// straight to the page: always, or while YouTube keeps refusing the app
+    private func pageFirst(for track: Track) -> Bool {
+        guard track.isYouTube, !Player.isOnPhone(track) else { return false }
+        switch WebPlayer.mode {
+        case "always": return true
+        case "off": return false
+        default: return (webUntil ?? .distantPast) > Date()
+        }
+    }
+
+    /// YouTube said no to the app; its page may still play the song
+    private func pageHelps(_ track: Track, after error: Error) -> Bool {
+        guard WebPlayer.mode != "off", track.videoId != nil else { return false }
+        return error is BotCheckError || error is HKError || error is HTTPStatusError
+    }
+
+    private func startWeb(_ track: Track, at: Double?) {
+        guard let id = track.videoId else { return }
+        loadTask?.cancel()
+        stopBackends()
+        backend = .web
+        viaWeb = true
+        throughEngine = false
+        isLoading = true
+        try? AVAudioSession.sharedInstance().setActive(true)
+        web.play(videoId: id, at: at)
+        library.pushHistory(track)
+        updateNowPlaying()
+        if autoContinue && queue.count - index <= 2 {
+            Task { await self.extend() }
+        }
+    }
+
+    private func webState(_ state: WebPlayer.State) {
+        guard backend == .web else { return }
+        webAd = state.ad
+        if state.ad { return }
+        position = state.time
+        if state.duration > 0, abs(state.duration - length) > 0.5 { length = state.duration }
+        let playing = !state.paused
+        if isLoading && playing && state.time > 0 {
+            isLoading = false
+            failures = 0
+        }
+        if playing != isPlaying {
+            isPlaying = playing
+            updateNowPlaying()
         }
     }
 
@@ -394,6 +480,9 @@ final class Player: ObservableObject {
     }
 
     private func stopBackends() {
+        if backend == .web { web.stop() }
+        viaWeb = false
+        webAd = false
         engine.stop()
         stream.pause()
         stream.replaceCurrentItem(with: nil)
@@ -457,6 +546,7 @@ final class Player: ObservableObject {
 
     /// the next song is fetched while this one plays, so it starts at once
     private func prefetchNext() {
+        guard (webUntil ?? .distantPast) < Date(), WebPlayer.mode != "always" else { return }
         guard let next = queue.dropFirst(index + 1).first(where: { $0.isYouTube }), let id = next.videoId else { return }
         Task.detached(priority: .utility) { _ = try? await AudioCache.shared.playable(videoId: id) }
     }
@@ -530,6 +620,8 @@ final class Player: ObservableObject {
                     updateNowPlaying()
                 }
             }
+        case .web:
+            break
         case .none:
             return
         }

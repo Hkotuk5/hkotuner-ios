@@ -40,7 +40,9 @@ struct NowPlayingView: View {
                 Scrubber(
                     position: player.position,
                     length: player.length,
-                    note: !player.throughEngine && track.isYouTube && !player.isLoading ? "поток" : nil,
+                    note: player.viaWeb
+                        ? (player.webAd ? "реклама" : "через YouTube")
+                        : (!player.throughEngine && track.isYouTube && !player.isLoading ? "поток" : nil),
                     onSeek: { player.seek(to: $0) }
                 )
                 .padding(.top, 14)
