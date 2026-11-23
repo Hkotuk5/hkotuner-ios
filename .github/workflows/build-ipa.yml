@@ -11,12 +11,16 @@ on:
         description: Test embedded yt-dlp on the iOS simulator
         type: boolean
         default: false
+      intel_runner:
+        description: Build the IPA on the alternative macOS Intel runner
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.ref }}${{ inputs.intel_runner && '-intel' || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -33,7 +37,7 @@ jobs:
 
   ipa:
     if: ${{ !inputs.resolver_probe }}
-    runs-on: macos-latest
+    runs-on: ${{ inputs.intel_runner && 'macos-26-intel' || 'macos-latest' }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
