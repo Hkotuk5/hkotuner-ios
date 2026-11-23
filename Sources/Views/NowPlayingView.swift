@@ -42,7 +42,9 @@ struct NowPlayingView: View {
                     length: player.length,
                     note: player.viaWeb
                         ? (player.webAd ? "реклама" : "через YouTube")
-                        : (!player.throughEngine && (track.isYouTube || track.isAudioStream) && !player.isLoading ? "поток" : nil),
+                        : (!player.throughEngine && !player.isLoading
+                           ? (track.isSoundCloud ? "SoundCloud" : (track.isYouTube || track.isAudioStream ? "поток" : nil))
+                           : nil),
                     onSeek: { player.seek(to: $0) }
                 )
                 .padding(.top, 14)

@@ -1,6 +1,11 @@
 import SwiftUI
 
 struct SearchView: View {
+    private enum Provider: String, CaseIterable, Identifiable {
+        case youtube = "YouTube Music", soundCloud = "SoundCloud"
+        var id: String { rawValue }
+    }
+
     enum Scope: String, CaseIterable, Identifiable {
         case songs = "Песни", artists = "Исполнители", albums = "Альбомы", playlists = "Плейлисты"
         var id: String { rawValue }
@@ -8,6 +13,7 @@ struct SearchView: View {
 
     @EnvironmentObject private var player: Player
     @State private var query = ""
+    @State private var provider = Provider.youtube
     @State private var scope = Scope.songs
     @State private var songs: [Track] = []
     @State private var cards: [MusicCard] = []
@@ -15,7 +21,7 @@ struct SearchView: View {
     @State private var error: String?
     @State private var searched = ""
     @State private var linkImport: String?
-    @State private var soundCloud: SoundCloudEmbed?
+    @State private var searchTask: Task<Void, Never>?
     @AppStorage("recentSearches") private var recentRaw = ""
 
     private var recent: [String] { recentRaw.split(separator: "\n").map(String.init) }
@@ -23,13 +29,15 @@ struct SearchView: View {
     var body: some View {
         NavigationStack {
             List {
-                if let embed = SoundCloudEmbed(query) {
-                    Button { openSoundCloud(embed) } label: {
-                        Label("Открыть плеер SoundCloud", systemImage: "play.circle")
-                            .font(.headline)
-                    }
-                    .listRowBackground(Theme.surface)
-                } else if let stream = Track.audioStream(from: query) {
+                Picker("Источник", selection: $provider) {
+                    ForEach(Provider.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+
+                if let stream = Track.audioStream(from: query) {
                     Section {
                         Button { player.playSingle(stream) } label: {
                             Label("Воспроизвести аудиопоток", systemImage: "play.circle")
@@ -61,19 +69,19 @@ struct SearchView: View {
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Песня, исполнитель или ссылка")
             .onSubmit(of: .search) { run() }
             .onChange(of: scope) { _ in if !searched.isEmpty { run() } }
+            .onChange(of: provider) { _ in if !searched.isEmpty { run() } }
             .onChange(of: query) { text in
                 if text.isEmpty {
+                    searchTask?.cancel()
                     searched = ""
                     songs = []
                     cards = []
                     error = nil
+                    searching = false
                 }
             }
             .sheet(item: Binding(get: { linkImport.map(LinkText.init) }, set: { linkImport = $0?.text })) { link in
                 LinkImportView(link: link.text)
-            }
-            .sheet(item: $soundCloud) { embed in
-                SoundCloudPlayerView(embed: embed)
             }
         }
     }
@@ -81,7 +89,7 @@ struct SearchView: View {
     @ViewBuilder private var startPage: some View {
         if recent.isEmpty {
             EmptyNote(icon: "magnifyingglass", title: "Найди что угодно",
-                      text: "Песни, исполнители, альбомы и плейлисты YouTube Music. Можно вставить ссылку на плейлист, трек SoundCloud или аудиопоток MP3, M4A или HLS (.m3u8).")
+                      text: "Введи название песни или исполнителя.")
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
         } else {
@@ -123,12 +131,12 @@ struct SearchView: View {
     }
 
     @ViewBuilder private var results: some View {
-        scopePicker
+        if provider == .youtube { scopePicker }
         if searching {
             ProgressView().frame(maxWidth: .infinity).padding().listRowBackground(Color.clear)
         } else if let error {
             Text(error).foregroundStyle(Theme.muted).listRowBackground(Color.clear)
-        } else if scope == .songs {
+        } else if provider == .soundCloud || scope == .songs {
             if songs.isEmpty {
                 EmptyNote(icon: "questionmark", title: "Ничего не нашлось").listRowBackground(Color.clear)
             }
@@ -151,10 +159,6 @@ struct SearchView: View {
     private func run() {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
-        if let embed = SoundCloudEmbed(q) {
-            openSoundCloud(embed)
-            return
-        }
         if let stream = Track.audioStream(from: q) {
             player.playSingle(stream)
             return
@@ -164,28 +168,35 @@ struct SearchView: View {
             return
         }
         remember(q)
+        searchTask?.cancel()
         searched = q
         searching = true
         error = nil
         let wanted = scope
-        Task {
+        let service = provider
+        searchTask = Task {
+            defer { if !Task.isCancelled { searching = false } }
             do {
-                switch wanted {
-                case .songs: songs = try await YTMusic.search(q)
-                case .artists: cards = try await YTMusic.searchArtists(q)
-                case .albums: cards = try await YTMusic.searchAlbums(q)
-                case .playlists: cards = try await YTMusic.searchPlaylists(q)
+                if service == .soundCloud {
+                    let found = try await EmbeddedAudioResolver.searchSoundCloud(q)
+                    if !Task.isCancelled { songs = found }
+                } else if wanted == .songs {
+                    let found = try await YTMusic.search(q)
+                    if !Task.isCancelled { songs = found }
+                } else {
+                    let found: [MusicCard]
+                    switch wanted {
+                    case .artists: found = try await YTMusic.searchArtists(q)
+                    case .albums: found = try await YTMusic.searchAlbums(q)
+                    case .playlists: found = try await YTMusic.searchPlaylists(q)
+                    case .songs: return
+                    }
+                    if !Task.isCancelled { cards = found }
                 }
             } catch {
-                self.error = error.localizedDescription
+                if !Task.isCancelled { self.error = error.localizedDescription }
             }
-            if scope == wanted && searched == q { searching = false }
         }
-    }
-
-    private func openSoundCloud(_ embed: SoundCloudEmbed) {
-        player.pause()
-        soundCloud = embed
     }
 
     private func remember(_ text: String) {

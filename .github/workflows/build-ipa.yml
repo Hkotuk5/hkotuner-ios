@@ -43,6 +43,7 @@ jobs:
 
       - name: Generate the Xcode project
         run: |
+          bash tools/prepare-ios-python.sh Support/PythonRuntime
           brew install xcodegen
           xcodegen generate
 

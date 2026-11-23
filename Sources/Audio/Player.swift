@@ -277,7 +277,7 @@ final class Player: ObservableObject {
         } else if repeatMode == .all && !queue.isEmpty {
             index = 0
             load()
-        } else if autoContinue && !queue.allSatisfy(\.isAudioStream) {
+        } else if autoContinue && queue.contains(where: \.isYouTube) {
             Task {
                 await self.extend()
                 if self.index + 1 < self.queue.count {
@@ -504,9 +504,12 @@ final class Player: ObservableObject {
         isLoading = false
         failures += 1
         if error is BotCheckError {
-            // what is on the phone still plays; the rest waits for another network
+            // Skip other YouTube requests while the service is asking for a bot check.
             message = "«\(track.title)» YouTube сейчас не отдал. " + (error.localizedDescription)
-            if let i = queue.indices.dropFirst(index + 1).first(where: { Player.isOnPhone(queue[$0]) }) {
+            if let i = queue.indices.dropFirst(index + 1).first(where: {
+                let candidate = queue[$0]
+                return candidate.isSoundCloud || candidate.isAudioStream || Player.isOnPhone(candidate)
+            }) {
                 index = i
                 load()
             }
@@ -534,7 +537,7 @@ final class Player: ObservableObject {
                 let reason = item?.error?.localizedDescription ?? "ошибка воспроизведения"
                 Task { @MainActor in
                     guard let self, let item, item === self.stream.currentItem, self.current?.id == track.id else { return }
-                    if track.isAudioStream {
+                    if track.isAudioStream || track.isSoundCloud {
                         self.stopBackends()
                         self.resumeAt = self.position
                         self.updateNowPlaying()
@@ -560,8 +563,21 @@ final class Player: ObservableObject {
             guard FileManager.default.fileExists(atPath: file.path) else { throw HKError("файла больше нет на телефоне") }
             return .file(file)
         }
+        if track.isSoundCloud {
+            return .stream(try await EmbeddedAudioResolver.stream(for: track))
+        }
         guard let id = track.videoId else { throw HKError("этот трек играет только на компьютере") }
-        return try await AudioCache.shared.playable(videoId: id)
+        if let file = AudioCache.localFile(id) { return .file(file) }
+        do {
+            return .stream(try await EmbeddedAudioResolver.stream(for: track))
+        } catch is BotCheckError {
+            throw BotCheckError()
+        } catch let error as HTTPStatusError where error.code == 429 {
+            throw error
+        } catch {
+            try Task.checkCancellation()
+            return try await AudioCache.shared.playable(videoId: id)
+        }
     }
 
     /// the next song is fetched while this one plays, so it starts at once

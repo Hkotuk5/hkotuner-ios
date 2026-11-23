@@ -18,6 +18,7 @@ struct Track: Codable, Hashable, Identifiable {
     var composer: String?
 
     var isYouTube: Bool { source == "youtube" && videoId != nil }
+    var isSoundCloud: Bool { source == "soundcloud" }
     var isLocal: Bool { source == "local" }
     var isAudioStream: Bool { source == "stream" }
     var audioStreamURL: URL? { isAudioStream ? Self.directAudioURL(url) : nil }
