@@ -3,10 +3,12 @@ import UIKit
 
 @main
 struct HkotunerApp: App {
+    @UIApplicationDelegateAdaptor(DownloadAppDelegate.self) private var appDelegate
     @StateObject private var player = Player.shared
     @StateObject private var library = LibraryStore.shared
     @StateObject private var account = YTAccount.shared
     @AppStorage("accent") private var accent = "amber"
+    @AppStorage("accent.custom") private var customAccent = "#f0a640"
     @AppStorage("appearance") private var appearance = "dark"
     @Environment(\.scenePhase) private var phase
 
@@ -17,12 +19,21 @@ struct HkotunerApp: App {
                 .environmentObject(library)
                 .environmentObject(account)
                 .preferredColorScheme(scheme)
-                .tint(Theme.color(accent))
-                .accentColor(Theme.color(accent))
+                .tint(Theme.color(accent, custom: customAccent))
+                .accentColor(Theme.color(accent, custom: customAccent))
                 .task {
                     library.autoBackupIfDue()
                     await ClientConfigStore.shared.refresh()
                     await Updates.shared.checkIfDue()
+                }
+                .task(id: phase) {
+                    guard phase == .active else { return }
+                    DeviceSync.shared.schedule()
+                    while !Task.isCancelled {
+                        await DeviceSync.shared.sync()
+                        do { try await Task.sleep(nanoseconds: 25_000_000_000) }
+                        catch { return }
+                    }
                 }
                 .onChange(of: phase) { now in
                     if now == .background {
@@ -32,6 +43,10 @@ struct HkotunerApp: App {
                         player.refreshWebPlaybackState()
                     }
                 }
+        }
+        .backgroundTask(.appRefresh(DeviceSync.refreshID)) {
+            await DeviceSync.shared.schedule()
+            await DeviceSync.shared.sync()
         }
     }
 
@@ -53,18 +68,39 @@ enum Theme {
     static let ink = dynamic(dark: (0.953, 0.945, 0.933), light: (0.098, 0.090, 0.082))
     static let muted = dynamic(dark: (0.953, 0.945, 0.933), light: (0.098, 0.090, 0.082), alpha: 0.55)
 
-    /// the desktop's default accent (#F0A640) and a few others
     static let accents: [(id: String, name: String, color: Color)] = [
-        ("amber", "Янтарь", Color(red: 0.941, green: 0.651, blue: 0.251)),
-        ("coral", "Коралл", Color(red: 0.965, green: 0.459, blue: 0.392)),
-        ("rose", "Роза", Color(red: 0.925, green: 0.451, blue: 0.651)),
-        ("violet", "Фиалка", Color(red: 0.639, green: 0.533, blue: 0.976)),
-        ("sky", "Небо", Color(red: 0.376, green: 0.698, blue: 0.965)),
-        ("mint", "Мята", Color(red: 0.400, green: 0.816, blue: 0.651)),
+        ("amber", "Янтарь", color(0xf0a640)),
+        ("red", "Красный", color(0xef4f5a)),
+        ("pink", "Розовый", color(0xee6aa7)),
+        ("violet", "Фиолетовый", color(0x9d7bf5)),
+        ("blue", "Синий", color(0x4f8ef7)),
+        ("teal", "Бирюзовый", color(0x2fbfa8)),
+        ("green", "Зелёный", color(0x6cc35a)),
     ]
 
-    static func color(_ id: String) -> Color {
-        accents.first(where: { $0.id == id })?.color ?? accents[0].color
+    static func accentID(_ id: String) -> String {
+        ["coral": "red", "rose": "pink", "sky": "blue", "mint": "teal"][id] ?? id
+    }
+
+    static func color(_ id: String, custom: String) -> Color {
+        if id == "custom", let rgb = UInt32(custom.dropFirst(), radix: 16) { return color(rgb) }
+        return accents.first(where: { $0.id == accentID(id) })?.color ?? accents[0].color
+    }
+
+    static func hex(_ color: Color) -> String? {
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        guard UIColor(color).getRed(&red, green: &green, blue: &blue, alpha: &alpha) else { return nil }
+        let rgb = [red, green, blue].map { Int((max(0, min(1, $0)) * 255).rounded()) }
+        return String(format: "#%02x%02x%02x", rgb[0], rgb[1], rgb[2])
+    }
+
+    private static func color(_ rgb: UInt32) -> Color {
+        Color(red: Double((rgb >> 16) & 255) / 255,
+              green: Double((rgb >> 8) & 255) / 255,
+              blue: Double(rgb & 255) / 255)
     }
 
     private static func dynamic(dark: (Double, Double, Double), light: (Double, Double, Double), alpha: Double = 1) -> Color {

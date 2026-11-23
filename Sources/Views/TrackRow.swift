@@ -3,6 +3,7 @@ import SwiftUI
 struct TrackRow: View {
     @EnvironmentObject private var player: Player
     @EnvironmentObject private var library: LibraryStore
+    @ObservedObject private var downloads = Downloads.shared
     let track: Track
     /// an album's track number instead of the cover
     var number: Int? = nil
@@ -31,7 +32,7 @@ struct TrackRow: View {
                     .foregroundStyle(isCurrent ? Theme.accent : Theme.ink)
                     .lineLimit(1)
                 HStack(spacing: 4) {
-                    if let id = track.videoId, AudioCache.isOffline(id) {
+                    if downloads.source(for: track) != nil {
                         Image(systemName: "arrow.down.circle.fill").font(.caption2).foregroundStyle(Theme.accent)
                     }
                     Text(subtitle).font(.subheadline).foregroundStyle(Theme.muted).lineLimit(1)
@@ -71,6 +72,7 @@ struct TrackMenu: ViewModifier {
                         ? Label("Убрать из любимых", systemImage: "heart.slash")
                         : Label("В любимые", systemImage: "heart")
                 }
+                DownloadAction(track: track)
                 Button { picking = true } label: { Label("В плейлист…", systemImage: "text.badge.plus") }
                 if track.isYouTube {
                     Button { player.playSingle(track) } label: {

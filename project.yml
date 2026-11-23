@@ -8,7 +8,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "4"
+    CURRENT_PROJECT_VERSION: "5"
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Manual
 targets:
@@ -60,7 +60,10 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
         UILaunchScreen: {}
-        UIBackgroundModes: [audio]
+        UIBackgroundModes: [audio, fetch]
+        BGTaskSchedulerPermittedIdentifiers: [uk.hkot.hkotuner.lan-sync]
+        NSBonjourServices: [_hkotuner-sync._tcp]
+        NSLocalNetworkUsageDescription: hkotuner синхронизирует библиотеку и профиль с твоим компьютером по Wi-Fi.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]

@@ -3,6 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct LibraryView: View {
+    @ObservedObject private var downloads = Downloads.shared
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var account: YTAccount
     @State private var naming = false
@@ -25,6 +26,7 @@ struct LibraryView: View {
                         tile("История", "clock.fill", songsText(library.library.history.count)) { HistoryView() }
                         tile("Исполнители", "music.mic", "\(library.library.artists.count)") { ArtistsView() }
                         tile("Мои файлы", "folder.fill", songsText(library.library.local.count)) { LocalFilesView() }
+                        tile("Скачанные", "arrow.down.circle.fill", songsText(downloads.tracks(in: library.library).count)) { DownloadedView() }
                         tile("Статистика", "chart.bar.fill", "итоги") { StatsView() }
                         tile("Скрытые", "hand.thumbsdown.fill", songsText(library.library.disliked.count)) { HiddenView() }
                     }
@@ -224,7 +226,7 @@ struct LikedView: View {
         TrackListView(
             title: "Любимые",
             tracks: library.library.liked,
-            empty: "Нажми ♥ у песни, и она будет здесь. Любимые сохраняются на телефон и играют без интернета.",
+            empty: "Нажми ♥ у песни, и она будет здесь.",
             onDelete: { library.removeLiked(at: $0) },
             onMove: { library.moveLiked(from: $0, to: $1) }
         )

@@ -6,7 +6,7 @@ struct HomeView: View {
     @EnvironmentObject private var account: YTAccount
     @StateObject private var feed = HomeFeed.shared
     @StateObject private var releases = NewReleases.shared
-    @AppStorage("profile.name") private var profileName = ""
+    @ObservedObject private var sync = DeviceSync.shared
 
     var body: some View {
         NavigationStack {
@@ -81,11 +81,7 @@ struct HomeView: View {
             }
             Spacer()
             NavigationLink { SettingsView() } label: {
-                ZStack {
-                    Circle().fill(Theme.accent.opacity(0.18))
-                    Text(initial).font(.headline.weight(.bold)).foregroundStyle(Theme.accent)
-                }
-                .frame(width: 44, height: 44)
+                ListenerAvatar(profile: sync.profile, fallback: initial, size: 44)
             }
             .accessibilityLabel("Настройки и профиль")
         }
@@ -94,7 +90,7 @@ struct HomeView: View {
     }
 
     private var name: String {
-        let own = profileName.trimmingCharacters(in: .whitespaces)
+        let own = sync.profile?.name.trimmingCharacters(in: .whitespaces) ?? ""
         if !own.isEmpty { return own }
         return account.name?.split(separator: " ").first.map(String.init) ?? ""
     }
@@ -125,52 +121,83 @@ struct HomeView: View {
 /// «Моя волна»: one big button that never runs out of songs
 struct WaveCard: View {
     @EnvironmentObject private var player: Player
-    @State private var phase = false
+    @EnvironmentObject private var library: LibraryStore
+
+    private var playing: Bool { player.isWave && player.isPlaying }
+    private var loading: Bool { player.isWave && player.isLoading }
 
     var body: some View {
-        Button { player.startWave() } label: {
-            ZStack(alignment: .bottomLeading) {
-                LinearGradient(colors: [Theme.accent, Theme.accent.opacity(0.55), Color(red: 0.55, green: 0.22, blue: 0.12)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-                bars
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(20)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Моя волна").font(.title.weight(.heavy)).foregroundStyle(.black)
-                    Text(player.isWave ? "Играет — нажми, чтобы начать заново" : "Бесконечный поток по твоему вкусу")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.black.opacity(0.7))
-                    HStack(spacing: 6) {
-                        Image(systemName: player.isWave && player.isLoading ? "hourglass" : "play.fill")
-                        Text(player.isWave && player.isLoading ? "Подбираю…" : "Слушать")
+        Button {
+            if player.isWave && player.current != nil { player.toggle() }
+            else { player.startWave() }
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Моя волна")
+                        .font(.title2.weight(.bold))
+                    if player.isWave, let current = player.current {
+                        Text("\(current.artist) — \(current.title)")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.74))
+                            .lineLimit(1)
                     }
-                    .font(.subheadline.weight(.bold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Capsule().fill(.black))
-                    .foregroundStyle(Theme.accent)
-                    .padding(.top, 6)
+                    HStack(spacing: 8) {
+                        ZStack {
+                            Circle().fill(.white)
+                            if loading {
+                                ProgressView().tint(.black)
+                            } else {
+                                Image(systemName: playing ? "pause.fill" : "play.fill")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundStyle(.black)
+                            }
+                        }
+                        .frame(width: 52, height: 52)
+                        Circle().fill(Color(red: 0.65, green: 0.48, blue: 1)).frame(width: 5, height: 5)
+                        Text(loading ? "Подбираю…" : playing ? "Волна играет" : "Слушать")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.white.opacity(0.74))
+                    }
+                    .padding(.top, 7)
                 }
-                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
+                covers
             }
-            .frame(height: 190)
-            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-            .shadow(color: Theme.accent.opacity(0.35), radius: 18, y: 8)
+            .foregroundStyle(.white)
+            .padding(18)
+            .frame(minHeight: 164)
+            .background {
+                let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+                shape.fill(.ultraThinMaterial)
+                    .environment(\.colorScheme, .dark)
+                    .overlay {
+                        shape.fill(LinearGradient(colors: [.black.opacity(0.33), Color(red: 0.25, green: 0.13, blue: 0.23).opacity(0.33)],
+                                                  startPoint: .leading, endPoint: .trailing))
+                    }
+                    .overlay { shape.strokeBorder(.white.opacity(0.12)) }
+            }
         }
         .buttonStyle(.plain)
-        .onAppear { phase = true }
+        .disabled(loading)
+        .accessibilityHint(playing ? "Поставить волну на паузу" : "Включить волну")
     }
 
-    private var bars: some View {
-        HStack(alignment: .bottom, spacing: 5) {
-            ForEach(0..<5, id: \.self) { i in
-                Capsule()
-                    .fill(.black.opacity(0.75))
-                    .frame(width: 6, height: phase && player.isWave && player.isPlaying ? CGFloat([34, 52, 26, 44, 30][i]) : CGFloat([14, 22, 10, 18, 12][i]))
-                    .animation(.easeInOut(duration: 0.55 + Double(i) * 0.08).repeatForever(autoreverses: true), value: phase && player.isPlaying)
+    private var covers: some View {
+        let tracks = (player.isWave ? Array(player.queue.dropFirst(max(0, player.index)).prefix(4)) : [])
+            + Array(library.library.liked.prefix(8)) + Array(library.library.history.prefix(8))
+        var seen = Set<URL>()
+        let images = Array(tracks.compactMap(\.thumbnailURL).filter { seen.insert($0).inserted }.prefix(4))
+        return ZStack(alignment: .leading) {
+            ForEach(0..<4, id: \.self) { index in
+                Artwork(url: images.indices.contains(index) ? images[index] : nil, size: 64, radius: 6)
+                    .rotationEffect(.degrees(Double(index - 2) * 4))
+                    .offset(x: CGFloat(index) * 13)
+                    .shadow(color: .black.opacity(0.36), radius: 4, y: 3)
             }
         }
-        .frame(height: 56, alignment: .bottom)
+        .frame(width: 108, height: 80, alignment: .leading)
+        .accessibilityHidden(true)
     }
 }
 

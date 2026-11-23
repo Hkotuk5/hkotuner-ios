@@ -342,6 +342,7 @@ struct NowPlayingView: View {
     private func moreMenu(_ track: Track) -> some View {
         Menu {
             Button { picking = true } label: { Label("В плейлист…", systemImage: "text.badge.plus") }
+            DownloadAction(track: track)
             if track.isYouTube {
                 Button { showArtist = true } label: { Label("Исполнитель", systemImage: "person") }
                 Button { player.playSingle(track) } label: { Label("Похожие треки", systemImage: "dot.radiowaves.left.and.right") }

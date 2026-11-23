@@ -6,8 +6,10 @@ struct SettingsView: View {
     @EnvironmentObject private var account: YTAccount
     @ObservedObject private var audio = AudioSettings.shared
     @ObservedObject private var updates = Updates.shared
-    @AppStorage("profile.name") private var profileName = ""
+    @ObservedObject private var downloads = Downloads.shared
+
     @AppStorage("accent") private var accent = "amber"
+    @AppStorage("accent.custom") private var customAccent = "#f0a640"
     @AppStorage("appearance") private var appearance = "dark"
     @State private var cacheBytes: Int64 = 0
     @State private var offlineBytes: Int64 = 0
@@ -24,8 +26,10 @@ struct SettingsView: View {
     var body: some View {
         List {
             Section("Профиль") {
-                TextField("Как тебя зовут", text: $profileName)
-                    .textInputAutocapitalization(.words)
+                ListenerProfileSettings()
+                NavigationLink { DeviceSettingsView() } label: {
+                    Label("Синхронизация", systemImage: "arrow.triangle.2.circlepath")
+                }
             }
 
             accountSection
@@ -40,6 +44,8 @@ struct SettingsView: View {
             }
 
             Section("Оформление") {
+                NavigationLink("Свой фон") { WallpaperSettingsView() }
+                NavigationLink("Мои темы") { SavedLooksView() }
                 Picker("Тема", selection: $appearance) {
                     Text("Тёмная").tag("dark")
                     Text("Светлая").tag("light")
@@ -47,19 +53,25 @@ struct SettingsView: View {
                 }
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Цвет")
-                    HStack(spacing: 12) {
+                    HStack(spacing: 10) {
                         ForEach(Theme.accents, id: \.id) { item in
                             Button { accent = item.id } label: {
                                 Circle()
                                     .fill(item.color)
-                                    .frame(width: 32, height: 32)
-                                    .overlay(Circle().stroke(Theme.ink, lineWidth: accent == item.id ? 3 : 0).padding(-4))
+                                    .frame(width: 28, height: 28)
+                                    .overlay(Circle().stroke(Theme.ink, lineWidth: Theme.accentID(accent) == item.id ? 3 : 0).padding(-4))
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(item.name)
                         }
                     }
                     .padding(.vertical, 4)
+                    ColorPicker("Свой цвет", selection: Binding(
+                        get: { Theme.color("custom", custom: customAccent) },
+                        set: {
+                            if let hex = Theme.hex($0) { customAccent = hex; accent = "custom" }
+                        }
+                    ), supportsOpacity: false)
                 }
             }
 
@@ -78,7 +90,7 @@ struct SettingsView: View {
                     }
                 }
                 .disabled(downloading != nil)
-                LabeledContent("На телефоне", value: "\(songsText(AudioCache.offlineCount())) · \(size(offlineBytes))")
+                LabeledContent("На телефоне", value: "\(songsText(downloads.tracks(in: library.library).count)) · \(size(offlineBytes))")
                 LabeledContent("Кэш недавних", value: size(cacheBytes))
                 Button("Очистить кэш", role: .destructive) {
                     AudioCache.clearCache()
@@ -87,7 +99,7 @@ struct SettingsView: View {
             } header: {
                 Text("Офлайн")
             } footer: {
-                Text("Лайкнутые песни сохраняются в память телефона и играют в метро и самолёте — и когда YouTube капризничает.")
+                Text("Готовые песни появятся в разделе «Скачанные» в библиотеке. Доступность скачивания зависит от источника.")
             }
 
             Section {
@@ -231,17 +243,17 @@ struct SettingsView: View {
     }
 
     private func downloadLiked() {
-        let ids = library.library.liked.compactMap(\.videoId).filter { !AudioCache.isOffline($0) }
-        guard !ids.isEmpty else {
+        let tracks = library.library.liked.filter { Downloads.supports($0) && downloads.source(for: $0) == nil }
+        guard !tracks.isEmpty else {
             note = "Все любимые уже на телефоне"
             return
         }
-        downloading = (0, ids.count)
+        downloading = (0, tracks.count)
         Task {
             var failed = 0
-            for (i, id) in ids.enumerated() {
+            for (i, track) in tracks.enumerated() {
                 do {
-                    try await AudioCache.shared.keepOffline(videoId: id)
+                    try await downloads.keep(track)
                 } catch {
                     failed += 1
                     // a bot check stops every download: no point asking 500 times
@@ -250,7 +262,7 @@ struct SettingsView: View {
                         break
                     }
                 }
-                downloading = (i + 1, ids.count)
+                downloading = (i + 1, tracks.count)
             }
             downloading = nil
             if note == nil || failed == 0 { note = failed == 0 ? "Готово" : "Готово, не скачалось: \(failed)" }

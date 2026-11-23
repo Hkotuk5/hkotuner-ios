@@ -28,7 +28,12 @@ struct StatsView: View {
         }
         .background(ScreenBackground())
         .navigationTitle("Статистика")
-        .confirmationDialog("Сбросить всю статистику?", isPresented: $confirmReset, titleVisibility: .visible) {
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                NavigationLink("Итоги года") { YearRecapView() }
+            }
+        }
+        .confirmationDialog("Сбросить статистику этого iPhone?", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("Сбросить", role: .destructive) { stats.reset() }
         }
     }

@@ -10,20 +10,37 @@ enum EmbeddedAudioResolver {
         return tracks.filter { $0.isSoundCloud && known.insert($0.id).inserted }
     }
 
+    struct AudioAddress {
+        let url: URL
+        let format: String?
+        let hls: Bool
+    }
+
     static func stream(for track: Track) async throws -> URL {
+        try await address(for: track, download: false).url
+    }
+
+    static func address(for track: Track, download: Bool) async throws -> AudioAddress {
         let provider = track.isSoundCloud ? "SoundCloud" : "YouTube"
         let address = track.videoId.map { "https://music.youtube.com/watch?v=\($0)" } ?? track.url
-        let response = try await request("resolve", address, provider: provider)
+        let response = try await request(download ? "download" : "resolve", address, provider: provider)
         guard let url = response.url, url.scheme == "https", url.host != nil, url.user == nil, url.password == nil else {
             throw HKError("\(provider) не отдал аудиопоток")
         }
-        return url
+        return AudioAddress(url: url, format: response.format, hls: response.protocolName?.hasPrefix("m3u8") == true)
     }
 
     private struct Response: Decodable {
         var error: String?
         var url: URL?
         var tracks: [Track]?
+        var format: String?
+        var protocolName: String?
+
+        enum CodingKeys: String, CodingKey {
+            case error, url, tracks, format
+            case protocolName = "protocol"
+        }
     }
 
     private static func request(_ operation: String, _ value: String, provider: String) async throws -> Response {

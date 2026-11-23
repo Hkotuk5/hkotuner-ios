@@ -5,6 +5,8 @@ struct RootView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var showNowPlaying = false
     @State private var incoming: SharedPlaylist?
+    @State private var pairingKey: String?
+    @State private var confirmPairing = false
     @State private var tab = 0
 
     var body: some View {
@@ -21,6 +23,22 @@ struct RootView: View {
         }
         .overlay(alignment: .top) { Toast() }
         .onOpenURL(perform: open)
+        .confirmationDialog("Подключить этот компьютер?", isPresented: $confirmPairing, titleVisibility: .visible) {
+            Button("Подключить") {
+                guard let pairingKey else { return }
+                defer { self.pairingKey = nil }
+                do {
+                    try DeviceSync.shared.pair(pairingKey)
+                    Task {
+                        await DeviceSync.shared.sync()
+                        player.message = DeviceSync.shared.error ?? "Компьютер синхронизирован"
+                    }
+                } catch { player.message = error.localizedDescription }
+            }
+            Button("Отмена", role: .cancel) { pairingKey = nil }
+        } message: {
+            Text("hkotuner будет обмениваться песнями, плейлистами, профилем и годовыми итогами в общей сети Wi-Fi.")
+        }
     }
 
     private func screen<V: View>(_ content: V, _ title: String, _ icon: String, _ tag: Int) -> some View {
@@ -38,6 +56,12 @@ struct RootView: View {
 
     /// a shared playlist: an hkotuner:// link from the share page, or a .hkplaylist file
     private func open(_ url: URL) {
+        if url.scheme?.lowercased() == "hkotuner", url.host == "pair",
+           let key = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "key" })?.value {
+            pairingKey = key
+            confirmPairing = true
+            return
+        }
         if url.isFileURL {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }

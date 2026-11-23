@@ -71,14 +71,18 @@ def extract(address, *, flat=False):
             raise ResolverError("unavailable") from None
 
 
-def resolve(address):
+def resolve(address, *, download=False):
     parts = https_url(address)
     if not parts or parts.hostname not in {
         "youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be", "soundcloud.com",
     }:
         raise ResolverError("unsupported_link")
     info = extract(address)
-    for audio in reversed(info.get("formats", [])):
+    formats = list(reversed(info.get("formats", [])))
+    if download:
+        # Prefer an AVFoundation-compatible file, then a downloadable HLS asset.
+        formats.sort(key=lambda audio: (audio.get("protocol") or "").startswith("m3u8"))
+    for audio in formats:
         protocol = audio.get("protocol") or ""
         if (audio.get("vcodec") == "none"
                 and audio.get("acodec", "none") != "none"
@@ -118,8 +122,8 @@ def search_soundcloud(query):
 def request(raw):
     try:
         payload = json.loads(raw)
-        if payload["operation"] == "resolve":
-            response = resolve(payload["value"])
+        if payload["operation"] in {"resolve", "download"}:
+            response = resolve(payload["value"], download=payload["operation"] == "download")
         elif payload["operation"] == "search":
             response = {"tracks": search_soundcloud(payload["value"])}
         else:

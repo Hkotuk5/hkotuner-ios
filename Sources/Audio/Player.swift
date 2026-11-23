@@ -523,6 +523,7 @@ final class Player: ObservableObject {
     }
 
     static func isOnPhone(_ track: Track) -> Bool {
+        if Downloads.shared.source(for: track) != nil { return true }
         if track.isLocal { return true }
         guard let id = track.videoId else { return false }
         return AudioCache.localFile(id) != nil
@@ -554,6 +555,7 @@ final class Player: ObservableObject {
     }
 
     private static func source(for track: Track) async throws -> PlaybackSource {
+        if let saved = Downloads.shared.source(for: track) { return saved }
         if track.isAudioStream {
             guard let url = track.audioStreamURL else { throw HKError("нужна прямая HTTPS-ссылка на аудио") }
             return .stream(url)

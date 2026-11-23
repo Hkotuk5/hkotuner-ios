@@ -281,11 +281,14 @@ struct EmptyNote: View {
 
 /// the warm glow at the top of every screen
 struct ScreenBackground: View {
+    @ObservedObject private var wallpaper = WallpaperStore.shared
+
     var body: some View {
         ZStack(alignment: .top) {
             Theme.background
             RadialGradient(colors: [Theme.accent.opacity(0.16), .clear], center: .top, startRadius: 0, endRadius: 420)
                 .frame(height: 420)
+            if let bytes = wallpaper.image { WallpaperImage(bytes: bytes, aspect: wallpaper.aspect, crop: wallpaper.crop) }
         }
         .ignoresSafeArea()
     }

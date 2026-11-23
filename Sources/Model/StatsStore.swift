@@ -23,6 +23,7 @@ final class StatsStore: ObservableObject {
         var tracks: [String: TrackStat] = [:]
         var days: [String: Double] = [:]
         var months: [String: [String: Int]] = [:]
+        var years: [String: ListeningSummary.Year]?
     }
 
     @Published private var data = Saved()
@@ -35,13 +36,56 @@ final class StatsStore: ObservableObject {
         if let raw = try? Data(contentsOf: self.fileURL), let saved = try? JSONDecoder().decode(Saved.self, from: raw) {
             data = saved
         }
+        if data.years == nil { migrateYears() }
+    }
+
+    private func migrateYears() {
+        var years: [String: ListeningSummary.Year] = [:]
+        for (day, seconds) in data.days { years[String(day.prefix(4)), default: .init()].seconds += seconds }
+        for (month, counts) in data.months {
+            let key = String(month.prefix(4))
+            for (id, count) in counts where count > 0 {
+                let plays = UInt64(count)
+                years[key, default: .init()].plays += plays
+                guard let track = data.tracks[id]?.track else { continue }
+                years[key, default: .init()].tracks[id, default: .init(track)].plays += plays
+                let artist = track.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !artist.isEmpty { years[key, default: .init()].artists[artist, default: .init()].plays += plays }
+            }
+        }
+        if years.count == 1, let key = years.keys.first {
+            for (id, stat) in data.tracks {
+                years[key, default: .init()].tracks[id, default: .init(stat.track)].seconds = stat.seconds
+                let artist = stat.track.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !artist.isEmpty { years[key, default: .init()].artists[artist, default: .init()].seconds += stat.seconds }
+            }
+        }
+        data.years = years
+    }
+
+    private func updateYear(for track: Track, seconds: Double, plays: UInt64, at date: Date) {
+        let key = String(Self.dayKey(date).prefix(4))
+        let artist = track.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        var year = data.years?[key] ?? .init()
+        year.seconds += seconds
+        year.plays += plays
+        year.tracks[track.id, default: .init(track)].seconds += seconds
+        year.tracks[track.id, default: .init(track)].plays += plays
+        if !artist.isEmpty {
+            year.artists[artist, default: .init()].add(.init(plays: plays, seconds: seconds))
+        }
+        if data.years == nil { data.years = [:] }
+        data.years?[key] = year
     }
 
     // MARK: counting
 
+    var localListening: ListeningSummary { ListeningSummary(years: data.years ?? [:]) }
+
     func listen(_ track: Track, seconds: Double) {
         guard seconds > 0 else { return }
         let day = Self.dayKey(Date())
+        updateYear(for: track, seconds: seconds, plays: 0, at: Date())
         data.days[day, default: 0] += seconds
         var stat = data.tracks[track.id] ?? TrackStat(track: track)
         stat.seconds += seconds
@@ -52,6 +96,7 @@ final class StatsStore: ObservableObject {
     }
 
     func countPlay(_ track: Track) {
+        updateYear(for: track, seconds: 0, plays: 1, at: Date())
         var stat = data.tracks[track.id] ?? TrackStat(track: track)
         stat.plays += 1
         stat.last = Date().timeIntervalSince1970
@@ -73,6 +118,13 @@ final class StatsStore: ObservableObject {
     }
 
     private func prune() {
+        if let years = data.years {
+            data.years = years.filter { $0.key >= String(Calendar.current.component(.year, from: Date()) - 2) }
+            for (key, year) in data.years ?? [:] where year.tracks.count > Self.maxTracks {
+                let keep = year.tracks.sorted { ($0.value.plays, $0.value.seconds) > ($1.value.plays, $1.value.seconds) }.prefix(Self.maxTracks)
+                data.years?[key]?.tracks = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+            }
+        }
         if data.tracks.count > Self.maxTracks {
             let keep = data.tracks.sorted { ($0.value.plays, $0.value.last) > ($1.value.plays, $1.value.last) }.prefix(Self.maxTracks)
             data.tracks = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })

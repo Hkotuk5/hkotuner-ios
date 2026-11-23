@@ -36,11 +36,11 @@ final class LibraryStore: ObservableObject {
     private func change(_ edit: (inout Library) -> Void) {
         var copy = library
         edit(&copy)
-        library = copy
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted]
             try encoder.encode(copy).write(to: fileURL, options: .atomic)
+            library = copy
         } catch {
             lastError = "Не удалось сохранить библиотеку: \(error.localizedDescription)"
         }
@@ -48,28 +48,34 @@ final class LibraryStore: ObservableObject {
 
     // MARK: likes and hidden songs
 
+    func applySync(_ shared: SharedLibrary) throws {
+        var copy = library
+        shared.apply(to: &copy)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted]
+        try encoder.encode(copy).write(to: fileURL, options: .atomic)
+        library = copy
+    }
+
     func isLiked(_ track: Track) -> Bool { library.liked.contains { $0.id == track.id } }
     func isDisliked(_ track: Track) -> Bool { library.disliked.contains { $0.id == track.id } }
 
     func toggleLike(_ track: Track) {
         if isLiked(track) {
             change { $0.liked.removeAll { $0.id == track.id } }
-            if let id = track.videoId { AudioCache.removeOffline(videoId: id) }
         } else {
             change {
                 $0.liked.insert(track, at: 0)
                 $0.disliked.removeAll { $0.id == track.id }
             }
-            if offlineLikes, let id = track.videoId {
-                Task.detached(priority: .utility) { try? await AudioCache.shared.keepOffline(videoId: id) }
+            if offlineLikes, Downloads.supports(track) {
+                Task(priority: .utility) { try? await Downloads.shared.keep(track) }
             }
         }
     }
 
     func removeLiked(at offsets: IndexSet) {
-        let gone = offsets.map { library.liked[$0] }
         change { $0.liked.remove(atOffsets: offsets) }
-        for track in gone { if let id = track.videoId { AudioCache.removeOffline(videoId: id) } }
     }
 
     func moveLiked(from source: IndexSet, to destination: Int) {
