@@ -50,6 +50,8 @@ final class Player: ObservableObject {
 
     private var ticker: Timer?
     private var loadTask: Task<Void, Never>?
+    private typealias StreamRequest = Task<EmbeddedAudioResolver.AudioAddress, Error>
+    private var preparedStream: (id: String, url: String, request: StreamRequest)?
     private var extending = false
     private var failures = 0
     private var artwork: MPMediaItemArtwork?
@@ -176,6 +178,7 @@ final class Player: ObservableObject {
         guard current != nil else { return play(tracks) }
         let known = Set(queue.map(\.id))
         queue.append(contentsOf: tracks.filter { !known.contains($0.id) })
+        prefetchNext()
     }
 
     func jump(to i: Int) {
@@ -188,17 +191,20 @@ final class Player: ObservableObject {
     func removeUpcoming(at offsets: IndexSet) {
         let absolute = IndexSet(offsets.map { $0 + index + 1 }.filter { queue.indices.contains($0) })
         queue.remove(atOffsets: absolute)
+        prefetchNext()
     }
 
     func moveUpcoming(from source: IndexSet, to destination: Int) {
         var rest = upcoming
         rest.move(fromOffsets: source, toOffset: destination)
         queue = Array(queue[...index]) + rest
+        prefetchNext()
     }
 
     func clearUpcoming() {
         guard queue.indices.contains(index) else { return }
         queue = Array(queue[...index])
+        prefetchNext()
     }
 
     /// «Моя волна»: an endless radio from the songs you like and play
@@ -369,7 +375,16 @@ final class Player: ObservableObject {
         updateNowPlaying()
         saveSession()
 
-        if pageFirst(for: track) {
+        let usePage = pageFirst(for: track)
+        let warmed: StreamRequest?
+        if !usePage, let preparedStream, preparedStream.id == track.id, preparedStream.url == track.url {
+            warmed = preparedStream.request
+        } else {
+            preparedStream?.request.cancel()
+            warmed = nil
+        }
+        preparedStream = nil
+        if usePage {
             startWeb(track, at: startAt)
             return
         }
@@ -377,9 +392,12 @@ final class Player: ObservableObject {
         // a song changed on the lock screen must finish loading in the background
         let background = UIApplication.shared.beginBackgroundTask(withName: "hkotuner.load")
         loadTask = Task {
-            defer { UIApplication.shared.endBackgroundTask(background) }
+            defer {
+                warmed?.cancel()
+                UIApplication.shared.endBackgroundTask(background)
+            }
             do {
-                let source = try await Player.source(for: track)
+                let source = try await Player.source(for: track, warmed: warmed)
                 guard !Task.isCancelled, self.current?.id == track.id else { return }
                 try? AVAudioSession.sharedInstance().setActive(true)
                 self.start(source, track: track, at: startAt)
@@ -394,7 +412,7 @@ final class Player: ObservableObject {
             } catch {
                 guard !Task.isCancelled, self.current?.id == track.id else { return }
                 if self.pageHelps(track, after: error) {
-                    if error is BotCheckError || (error as? HTTPStatusError)?.code == 429 {
+                    if Self.providerLimited(error) {
                         self.webUntil = Date().addingTimeInterval(30 * 60)
                     }
                     self.startWeb(track, at: startAt)
@@ -576,7 +594,7 @@ final class Player: ObservableObject {
             }
     }
 
-    private static func source(for track: Track) async throws -> PlaybackSource {
+    private static func source(for track: Track, warmed: StreamRequest?) async throws -> PlaybackSource {
         if let saved = Downloads.shared.source(for: track) { return saved }
         if track.isAudioStream {
             guard let url = track.audioStreamURL else { throw HKError("нужна прямая HTTPS-ссылка на аудио") }
@@ -587,30 +605,59 @@ final class Player: ObservableObject {
             guard FileManager.default.fileExists(atPath: file.path) else { throw HKError("файла больше нет на телефоне") }
             return .file(file)
         }
-        if track.isSoundCloud {
-            let audio = try await EmbeddedAudioResolver.address(for: track, download: false)
-            return .stream(audio.url, duration: audio.duration)
-        }
-        guard let id = track.videoId else { throw HKError("этот трек играет только на компьютере") }
-        if let file = AudioCache.localFile(id) { return .file(file) }
+        let id = track.videoId
+        guard track.isSoundCloud || id != nil else { throw HKError("этот трек играет только на компьютере") }
+        if let id, let file = AudioCache.localFile(id) { return .file(file) }
         do {
+            if let warmed {
+                let result = await withTaskCancellationHandler {
+                    await warmed.result
+                } onCancel: {
+                    warmed.cancel()
+                }
+                try Task.checkCancellation()
+                switch result {
+                case .success(let audio) where audio.reuseDeadline > Date():
+                    return .stream(audio.url, duration: audio.duration)
+                case .failure(let error) where providerLimited(error):
+                    throw error
+                default:
+                    break
+                }
+            }
             let audio = try await EmbeddedAudioResolver.address(for: track, download: false)
             return .stream(audio.url, duration: audio.duration)
-        } catch is BotCheckError {
-            throw BotCheckError()
-        } catch let error as HTTPStatusError where error.code == 429 {
-            throw error
         } catch {
             try Task.checkCancellation()
+            guard !providerLimited(error), !track.isSoundCloud, let id else { throw error }
             return try await AudioCache.shared.playable(videoId: id)
         }
     }
 
-    /// the next song is fetched while this one plays, so it starts at once
+    private static func providerLimited(_ error: Error) -> Bool {
+        error is BotCheckError || (error as? HTTPStatusError)?.code == 429
+    }
+
+    /// Resolve just the next track before the current song finishes.
     private func prefetchNext() {
-        guard (webUntil ?? .distantPast) < Date(), WebPlayer.mode != "always" else { return }
-        guard let next = queue.dropFirst(index + 1).first(where: { $0.isYouTube }), let id = next.videoId else { return }
-        Task.detached(priority: .utility) { _ = try? await AudioCache.shared.playable(videoId: id) }
+        let next = queue.indices.contains(index + 1) ? queue[index + 1] : nil
+        if let preparedStream {
+            if next?.id == preparedStream.id, next?.url == preparedStream.url { return }
+            preparedStream.request.cancel()
+            self.preparedStream = nil
+        }
+        guard backend != .none, !isLoading, length - position <= 60, let next,
+              next.isYouTube || next.isSoundCloud, !isOnPhoneForPrefetch(next), !pageFirst(for: next) else { return }
+        let request = Task(priority: .utility) {
+            try await EmbeddedAudioResolver.address(for: next, download: false)
+        }
+        preparedStream = (next.id, next.url, request)
+    }
+
+    private func isOnPhoneForPrefetch(_ track: Track) -> Bool {
+        if Downloads.shared.source(for: track) != nil { return true }
+        guard let id = track.videoId else { return false }
+        return AudioCache.isOffline(id) || FileManager.default.fileExists(atPath: AudioCache.cacheFile(id).path)
     }
 
     /// more songs like the last YouTube one in the queue
@@ -711,6 +758,7 @@ final class Player: ObservableObject {
         sinceSave += delta
         if sinceSave >= 10 {
             sinceSave = 0
+            if preparedStream == nil { prefetchNext() }
             saveSession()
         }
     }

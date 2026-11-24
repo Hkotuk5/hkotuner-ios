@@ -103,6 +103,13 @@ actor LyricsService {
         return m * 60 + s
     }
 
+    /// Length of the highlight sweep for a line from a line-timed transcript.
+    static func lineSpan(_ line: LyricLine, in lines: [LyricLine], duration: Double) -> Double {
+        let next = lines.first { $0.time > line.time }?.time
+        let end = next ?? (duration.isFinite && duration > line.time ? duration : line.time + 3)
+        return max(0.1, end - line.time)
+    }
+
     /// the line being sung at `time`
     static func current(_ lines: [LyricLine], at time: Double) -> Int? {
         var found: Int?

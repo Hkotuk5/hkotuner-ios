@@ -2,6 +2,18 @@ import XCTest
 @testable import hkotuner
 
 final class StreamTimingTests: XCTestCase {
+    func testPreparedAudioIsReusedOnlyBeforeItsDeadline() throws {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let soon = try XCTUnwrap(URL(string: "https://example.com/audio.m4a?Expires=1750000050"))
+        let later = try XCTUnwrap(URL(string: "https://example.com/audio.m4a?expire=1751000000"))
+        let invalid = try XCTUnwrap(URL(string: "https://example.com/audio.m4a?expire=unknown"))
+        let nearExpiry = try XCTUnwrap(URL(string: "https://example.com/audio.m4a?expire=1750000005"))
+        XCTAssertEqual(EmbeddedAudioResolver.reuseDeadline(for: soon, from: now), now.addingTimeInterval(30))
+        XCTAssertEqual(EmbeddedAudioResolver.reuseDeadline(for: later, from: now), now.addingTimeInterval(120))
+        XCTAssertEqual(EmbeddedAudioResolver.reuseDeadline(for: invalid, from: now), now.addingTimeInterval(120))
+        XCTAssertLessThan(EmbeddedAudioResolver.reuseDeadline(for: nearExpiry, from: now), now)
+    }
+
     func testOverstatedDurationUsesTheSongEnd() {
         let timing = StreamTiming(reported: 192, reference: 96)
         XCTAssertEqual(timing.length, 96)

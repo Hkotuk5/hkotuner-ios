@@ -204,6 +204,13 @@ final class AccountAndLyricsTests: XCTestCase {
         XCTAssertEqual(LyricsService.mainArtist("A, B & C"), "A")
     }
 
+    func testLyricSweepSpansFollowingTimestampAndLastLine() {
+        let lines = LyricsService.parseSynced("[00:01.00]первая\n[00:01.00]первая\n[00:02.50]последняя")
+        XCTAssertEqual(LyricsService.lineSpan(lines[0], in: lines, duration: 7), 1.5)
+        XCTAssertEqual(LyricsService.lineSpan(lines[2], in: lines, duration: 7), 4.5)
+        XCTAssertEqual(LyricsService.lineSpan(lines[2], in: lines, duration: .infinity), 3)
+    }
+
     func testVersions() {
         XCTAssertTrue(Updates.newer("0.10.0", than: "0.9.2"))
         XCTAssertFalse(Updates.newer("0.2.0", than: "0.2"))

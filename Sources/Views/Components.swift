@@ -335,3 +335,26 @@ func songsText(_ n: Int) -> String {
     }
     return "\(n) \(word)"
 }
+
+/// Cross-fades the playback state while the button keeps its size and hit area.
+struct PlaybackGlyph: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let playing: Bool
+    let loading: Bool
+
+    var body: some View {
+        ZStack {
+            if loading {
+                ProgressView().transition(.opacity)
+            } else {
+                Image(systemName: playing ? "pause.fill" : "play.fill")
+                    .offset(x: playing ? 0 : 1)
+                    .contentTransition(.opacity)
+                    .transition(.opacity)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: playing)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: loading)
+        .accessibilityHidden(true)
+    }
+}

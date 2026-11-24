@@ -120,6 +120,7 @@ struct HomeView: View {
 
 /// «Моя волна»: one big button that never runs out of songs
 struct WaveCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var player: Player
     @EnvironmentObject private var library: LibraryStore
 
@@ -144,21 +145,28 @@ struct WaveCard: View {
                     HStack(spacing: 8) {
                         ZStack {
                             Circle().fill(.white)
-                            if loading {
-                                ProgressView().tint(.black)
-                            } else {
-                                Image(systemName: playing ? "pause.fill" : "play.fill")
-                                    .font(.system(size: 15, weight: .semibold))
-                                    .foregroundStyle(.black)
-                            }
+                            PlaybackGlyph(playing: playing, loading: loading)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(.black)
+                                .tint(.black)
                         }
                         .frame(width: 52, height: 52)
-                        Circle().fill(Color(red: 0.65, green: 0.48, blue: 1)).frame(width: 5, height: 5)
+                        Circle().fill(Color(red: 0.65, green: 0.48, blue: 1))
+                            .frame(width: 5, height: 5)
+                            .background {
+                                Circle()
+                                    .strokeBorder(.white.opacity(playing ? 0.55 : 0), lineWidth: 1)
+                                    .frame(width: 12, height: 12)
+                                    .scaleEffect(playing && !reduceMotion ? 1 : 0.5)
+                            }
                         Text(loading ? "Подбираю…" : playing ? "Волна играет" : "Слушать")
                             .font(.caption.weight(.medium))
                             .foregroundStyle(.white.opacity(0.74))
+                            .contentTransition(.opacity)
                     }
                     .padding(.top, 7)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: playing)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: loading)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .layoutPriority(1)

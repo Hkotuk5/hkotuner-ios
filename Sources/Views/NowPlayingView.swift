@@ -6,6 +6,7 @@ struct NowPlayingView: View {
     enum Pane { case cover, lyrics, queue }
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var player: Player
     @EnvironmentObject private var library: LibraryStore
     @ObservedObject private var audio = AudioSettings.shared
@@ -23,20 +24,26 @@ struct NowPlayingView: View {
                     switch pane {
                     case .cover:
                         cover(track)
+                            .transition(paneTransition)
                     case .lyrics:
                         VStack(spacing: 0) {
                             compactHeader(track)
                             LyricsPane(track: track)
+                                .id(track.id)
                         }
+                        .transition(paneTransition)
                     case .queue:
                         VStack(spacing: 0) {
                             compactHeader(track)
                             QueuePane()
                         }
+                        .transition(paneTransition)
                     }
                 }
                 .frame(maxHeight: .infinity)
-                if pane == .cover { titleRow(track).padding(.top, 20) }
+                if pane == .cover {
+                    titleRow(track).padding(.top, 20).transition(.opacity)
+                }
                 Scrubber(
                     position: player.position,
                     length: player.length,
@@ -83,6 +90,10 @@ struct NowPlayingView: View {
         }
     }
 
+    private var paneTransition: AnyTransition {
+        reduceMotion ? .identity : .opacity.combined(with: .offset(y: 8))
+    }
+
     // MARK: parts
 
     private var backdrop: some View {
@@ -109,7 +120,7 @@ struct NowPlayingView: View {
             )
         }
         .ignoresSafeArea()
-        .animation(.easeInOut(duration: 0.6), value: player.current?.id)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.6), value: player.current?.id)
     }
 
     private var topBar: some View {
@@ -148,13 +159,18 @@ struct NowPlayingView: View {
     private func cover(_ track: Track) -> some View {
         GeometryReader { geo in
             let side = max(0, min(geo.size.width, geo.size.height))
-            Artwork(url: track.thumbnailURL, size: side, radius: 22)
-                .scaleEffect(player.isPlaying || player.isLoading ? 1 : 0.86)
+            ZStack {
+                Artwork(url: track.thumbnailURL, size: side, radius: 22)
+                    .id(track.id)
+                    .transition(.opacity)
+            }
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.26), value: track.id)
+                .scaleEffect(reduceMotion || player.isPlaying || player.isLoading ? 1 : 0.86)
                 .shadow(color: .black.opacity(player.isPlaying ? 0.45 : 0.25), radius: 30, y: 16)
                 .offset(x: swipe)
-                .rotationEffect(.degrees(Double(swipe) / 40))
+                .rotationEffect(.degrees(reduceMotion ? 0 : Double(swipe) / 40))
                 .opacity(1 - min(0.5, abs(Double(swipe)) / 400))
-                .animation(.spring(response: 0.45, dampingFraction: 0.78), value: player.isPlaying)
+                .animation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.78), value: player.isPlaying)
                 .frame(width: geo.size.width, height: geo.size.height)
                 .contentShape(Rectangle())
                 .gesture(
@@ -163,7 +179,7 @@ struct NowPlayingView: View {
                         .onEnded { value in
                             let dx = value.translation.width
                             if dx < -90 { player.next() } else if dx > 90 { player.previous() }
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { swipe = 0 }
+                            withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8)) { swipe = 0 }
                         }
                 )
                 .accessibilityLabel("Обложка")
@@ -211,12 +227,14 @@ struct NowPlayingView: View {
     private func likeButton(_ track: Track) -> some View {
         let liked = library.isLiked(track)
         return Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { library.toggleLike(track) }
+            library.toggleLike(track)
         } label: {
             Image(systemName: liked ? "heart.fill" : "heart")
                 .font(.system(size: 22, weight: .semibold))
                 .foregroundStyle(liked ? Theme.accent : Theme.ink)
-                .scaleEffect(liked ? 1.08 : 1)
+                .contentTransition(.opacity)
+                .scaleEffect(liked && !reduceMotion ? 1.14 : 1)
+                .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.48), value: liked)
                 .frame(width: 44, height: 44)
         }
         .buttonStyle(.plain)
@@ -243,14 +261,10 @@ struct NowPlayingView: View {
             Button { player.toggle() } label: {
                 ZStack {
                     Circle().fill(Theme.accent)
-                    if player.isLoading {
-                        ProgressView().tint(.black)
-                    } else {
-                        Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 30, weight: .bold))
-                            .foregroundStyle(.black)
-                            .offset(x: player.isPlaying ? 0 : 2)
-                    }
+                    PlaybackGlyph(playing: player.isPlaying, loading: player.isLoading)
+                        .font(.system(size: 30, weight: .bold))
+                        .foregroundStyle(.black)
+                        .tint(.black)
                 }
                 .frame(width: 74, height: 74)
                 .shadow(color: Theme.accent.opacity(0.35), radius: 16, y: 6)
@@ -332,7 +346,9 @@ struct NowPlayingView: View {
 
     private func paneButton(_ which: Pane, _ icon: String, _ label: String) -> some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.25)) { pane = pane == which ? .cover : which }
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.24)) {
+                pane = pane == which ? .cover : which
+            }
         } label: {
             barItem(active: pane == which) { Image(systemName: icon) }
         }
@@ -425,6 +441,7 @@ struct Scrubber: View {
 /// the words of the song; synced lines follow the music and can be tapped
 struct LyricsPane: View {
     @EnvironmentObject private var player: Player
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let track: Track
     @State private var lyrics: Lyrics?
     @State private var lines: [LyricLine] = []
@@ -451,35 +468,135 @@ struct LyricsPane: View {
         }
         .task(id: track.id) {
             loading = true
-            lyrics = await LyricsService.shared.find(track)
-            lines = lyrics?.synced.map(LyricsService.parseSynced) ?? []
+            let found = await LyricsService.shared.find(track)
+            guard !Task.isCancelled else { return }
+            lyrics = found
+            lines = found?.synced.map(LyricsService.parseSynced) ?? []
             loading = false
         }
     }
 
     private var synced: some View {
         let now = LyricsService.current(lines, at: player.position)
-        return ScrollViewReader { proxy in
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(lines) { line in
-                        Text(line.text.isEmpty ? "♪" : line.text)
-                            .font(.title3.weight(.bold))
-                            .foregroundStyle(line.id == now ? Theme.ink : Theme.muted.opacity(line.id < (now ?? -1) ? 0.6 : 1))
-                            .scaleEffect(line.id == now ? 1.03 : 1, anchor: .leading)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .id(line.id)
-                            .onTapGesture { player.seek(to: line.time) }
+        return GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(lines) { line in
+                            lyricRow(line, active: line.id == now, past: line.id < (now ?? -1))
+                                .id(line.id)
+                        }
+                    }
+                    .padding(.vertical, max(12, geometry.size.height / 2 - 24))
+                }
+                .mask {
+                    LinearGradient(stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .black, location: 0.13),
+                        .init(color: .black, location: 0.87),
+                        .init(color: .clear, location: 1)
+                    ], startPoint: .top, endPoint: .bottom)
+                }
+                .onAppear {
+                    if let now { proxy.scrollTo(now, anchor: .center) }
+                }
+                .onChange(of: now) { id in
+                    guard let id else {
+                        if let first = lines.first { proxy.scrollTo(first.id, anchor: .center) }
+                        return
+                    }
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.36)) {
+                        proxy.scrollTo(id, anchor: .center)
                     }
                 }
-                .padding(.vertical, 60)
-            }
-            .mask(LinearGradient(colors: [.clear, .black, .black, .clear], startPoint: .top, endPoint: .bottom))
-            .onChange(of: now) { id in
-                guard let id else { return }
-                withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(id, anchor: .center) }
             }
         }
+    }
+
+    private func lyricRow(_ line: LyricLine, active: Bool, past: Bool) -> some View {
+        let text = line.text.isEmpty ? "♪" : line.text
+        return Button { player.seek(to: line.time) } label: {
+            Group {
+                if active && !reduceMotion && !line.text.isEmpty {
+                    LyricHighlight(
+                        text: text,
+                        offset: player.position - line.time,
+                        span: LyricsService.lineSpan(line, in: lines, duration: player.length),
+                        playing: player.isPlaying && !player.webAd
+                    )
+                } else {
+                    Text(text).foregroundStyle(active ? Theme.ink : Theme.muted.opacity(past ? 0.78 : 1))
+                }
+            }
+            .multilineTextAlignment(.leading)
+            .font(.title3.weight(.bold))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(minHeight: 44)
+            .background(active ? Theme.accent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(Theme.accent)
+                    .frame(width: 3)
+                    .padding(.vertical, 9)
+                    .opacity(active ? 1 : 0)
+            }
+            .offset(x: active && !reduceMotion ? 3 : 0)
+            .contentShape(Rectangle())
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.23), value: active)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(active ? .isSelected : [])
+    }
+}
+
+private struct LyricHighlight: View {
+    let text: String
+    let offset: Double
+    let span: Double
+    let playing: Bool
+    @State private var paintedOffset: Double
+
+    init(text: String, offset: Double, span: Double, playing: Bool) {
+        self.text = text
+        self.offset = offset
+        self.span = span
+        self.playing = playing
+        _paintedOffset = State(initialValue: offset)
+    }
+
+    var body: some View {
+        Text(text)
+            .modifier(LyricShimmer(progress: min(1, max(0, paintedOffset / span))))
+            .onChange(of: offset) { updated in
+                let step = updated - paintedOffset
+                let advance = playing && step > 0 && step <= 0.85
+                withAnimation(advance ? .linear(duration: 0.4) : nil) {
+                    paintedOffset = updated
+                }
+            }
+    }
+}
+
+private struct LyricShimmer: AnimatableModifier {
+    var progress: Double
+    var animatableData: Double {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        // Keep the highlight soft as it passes over letters and wrapped lines.
+        let edge = progress * 1.2 - 0.1
+        func location(_ offset: Double) -> CGFloat { CGFloat(min(1, max(0, edge + offset))) }
+        return content.foregroundStyle(LinearGradient(stops: [
+            .init(color: Theme.ink, location: location(-0.075)),
+            .init(color: Theme.ink, location: location(-0.03)),
+            .init(color: Theme.accent, location: location(0)),
+            .init(color: Theme.ink.opacity(0.62), location: location(0.09))
+        ], startPoint: .topLeading, endPoint: .bottomTrailing))
     }
 }
 

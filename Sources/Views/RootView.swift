@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct RootView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var player: Player
     @EnvironmentObject private var library: LibraryStore
     @State private var showNowPlaying = false
@@ -50,11 +51,15 @@ struct RootView: View {
     private func screen<V: View>(_ content: V, _ title: String, _ icon: String, _ tag: Int) -> some View {
         content
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if player.current != nil {
-                    MiniPlayer { showNowPlaying = true }
-                        .padding(.horizontal, 10)
-                        .padding(.bottom, 6)
+                ZStack {
+                    if player.current != nil {
+                        MiniPlayer { showNowPlaying = true }
+                            .padding(.horizontal, 10)
+                            .padding(.bottom, 6)
+                            .transition(.opacity.combined(with: .offset(y: 12)))
+                    }
                 }
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: player.current != nil)
             }
             .tabItem { Label(title, systemImage: icon) }
             .tag(tag)
@@ -123,6 +128,7 @@ struct Toast: View {
 
 /// the song that plays, floating over the bottom of every screen
 struct MiniPlayer: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var player: Player
     @EnvironmentObject private var library: LibraryStore
     let open: () -> Void
@@ -140,20 +146,18 @@ struct MiniPlayer: View {
                     Image(systemName: library.isLiked(track) ? "heart.fill" : "heart")
                         .font(.body.weight(.semibold))
                         .foregroundStyle(library.isLiked(track) ? Theme.accent : Theme.ink)
+                        .contentTransition(.opacity)
+                        .scaleEffect(library.isLiked(track) && !reduceMotion ? 1.12 : 1)
+                        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.5),
+                                   value: library.isLiked(track))
                         .frame(width: 38, height: 44)
                 }
                 .accessibilityLabel(library.isLiked(track) ? "Убрать из любимых" : "В любимые")
                 Button { player.toggle() } label: {
-                    Group {
-                        if player.isLoading {
-                            ProgressView()
-                        } else {
-                            Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                        }
-                    }
-                    .font(.title3)
-                    .foregroundStyle(Theme.ink)
-                    .frame(width: 40, height: 44)
+                    PlaybackGlyph(playing: player.isPlaying, loading: player.isLoading)
+                        .font(.title3)
+                        .foregroundStyle(Theme.ink)
+                        .frame(width: 40, height: 44)
                 }
                 .accessibilityLabel(player.isPlaying ? "Пауза" : "Играть")
                 Button { player.next() } label: {

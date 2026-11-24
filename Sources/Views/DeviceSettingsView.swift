@@ -1,4 +1,5 @@
 import ImageIO
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -26,6 +27,7 @@ struct ListenerProfileSettings: View {
     @ObservedObject private var sync = DeviceSync.shared
     @State private var name = ""
     @State private var choosing = false
+    @State private var photo: PhotosPickerItem?
     @State private var note: String?
 
     var body: some View {
@@ -41,24 +43,47 @@ struct ListenerProfileSettings: View {
         }
             .onAppear { name = sync.profile?.name ?? "" }
             .onChange(of: sync.profile?.name) { name = $0 ?? "" }
+        PhotosPicker(selection: $photo, matching: .images, preferredItemEncoding: .current) {
+            Label("Выбрать аватар…", systemImage: "photo")
+        }
+        .task(id: photo) {
+            guard let selection = photo else { return }
+            do {
+                let data = try await selection.loadTransferable(type: Data.self)
+                guard !Task.isCancelled, selection == photo else { return }
+                guard let data else { throw HKError("Не удалось загрузить фото") }
+                try saveAvatar(Self.avatar(from: data))
+            } catch {
+                guard !Task.isCancelled, selection == photo else { return }
+                note = error.localizedDescription
+            }
+            photo = nil
+        }
+
+        Button { choosing = true } label: { Label("Аватар из файла…", systemImage: "folder") }
             .fileImporter(isPresented: $choosing, allowedContentTypes: [.image]) { result in
                 do {
                     let image = try Self.avatar(from: result.get())
-                    try sync.saveProfile(name: name, avatar: image)
-                    note = nil
+                    try saveAvatar(image)
+                    photo = nil
                 } catch { note = error.localizedDescription }
             }
-        Button { choosing = true } label: { Label("Выбрать аватар…", systemImage: "person.crop.circle") }
-            .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         if sync.profile?.avatar != nil {
             Button("Убрать аватар", role: .destructive) {
-                do { try sync.saveProfile(name: name, avatar: nil) }
-                catch { note = error.localizedDescription }
+                do {
+                    try saveAvatar(nil)
+                    photo = nil
+                } catch { note = error.localizedDescription }
             }
         }
         if let note { Text(note).font(.footnote).foregroundStyle(.secondary) }
+    }
 
-
+    private func saveAvatar(_ avatar: String?) throws {
+        let entered = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nickname = entered.isEmpty ? (sync.profile?.name ?? sync.onlineUsername ?? "Слушатель") : entered
+        try sync.saveProfile(name: nickname, avatar: avatar)
+        note = nil
     }
 
     private func saveName() {
@@ -74,7 +99,11 @@ struct ListenerProfileSettings: View {
         guard let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 20_000_000 else {
             throw HKError("Выбери изображение до 20 МБ")
         }
-        let data = try Data(contentsOf: url)
+        return try avatar(from: Data(contentsOf: url))
+    }
+
+    private static func avatar(from data: Data) throws -> String {
+        guard data.count <= 20_000_000 else { throw HKError("Выбери изображение до 20 МБ") }
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
             throw HKError("Не удалось открыть изображение")
         }
