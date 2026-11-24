@@ -56,6 +56,9 @@ final class Player: ObservableObject {
     private var artworkFor: String?
     private var bag = Set<AnyCancellable>()
     private var itemStatus: AnyCancellable?
+    private var streamDurationTask: Task<Void, Never>?
+    private var streamDuration: Double?
+    private var streamEnd: Double?
     /// where a song brought back from the last session starts
     private var resumeAt: Double?
     private var lastTick = Date()
@@ -479,13 +482,28 @@ final class Player: ObservableObject {
             }
         }
         let item = AVPlayerItem(url: source.url)
+        if case .stream(_, let duration) = source {
+            streamDuration = StreamTiming.valid(duration) ?? StreamTiming.valid(track.duration)
+            if let streamDuration { length = streamDuration }
+        }
         watch(item, track: track)
         backend = .stream
         throughEngine = false
         stream.volume = sleepFade
         stream.replaceCurrentItem(with: item)
-        if let at, at > 0 { stream.seek(to: CMTime(seconds: at, preferredTimescale: 600)) }
+        if let at, at > 0, streamDuration.map({ at < $0 }) ?? true {
+            stream.seek(to: CMTime(seconds: at, preferredTimescale: 600))
+        }
         stream.play()
+
+        if streamDuration == nil, source.url.scheme == "https", source.url.pathExtension.lowercased() == "m3u8" {
+            streamDurationTask = Task { [weak self, weak item] in
+                guard let duration = await HLSPlaylistTiming.read(source.url), !Task.isCancelled,
+                      let self, let item, item === self.stream.currentItem else { return }
+                self.streamDuration = duration
+                self.updateStreamTiming(item)
+            }
+        }
     }
 
     private func stopBackends() {
@@ -496,6 +514,10 @@ final class Player: ObservableObject {
         stream.pause()
         stream.replaceCurrentItem(with: nil)
         itemStatus = nil
+        streamDurationTask?.cancel()
+        streamDurationTask = nil
+        streamDuration = nil
+        streamEnd = nil
         backend = .none
         isPlaying = false
     }
@@ -566,12 +588,14 @@ final class Player: ObservableObject {
             return .file(file)
         }
         if track.isSoundCloud {
-            return .stream(try await EmbeddedAudioResolver.stream(for: track))
+            let audio = try await EmbeddedAudioResolver.address(for: track, download: false)
+            return .stream(audio.url, duration: audio.duration)
         }
         guard let id = track.videoId else { throw HKError("этот трек играет только на компьютере") }
         if let file = AudioCache.localFile(id) { return .file(file) }
         do {
-            return .stream(try await EmbeddedAudioResolver.stream(for: track))
+            let audio = try await EmbeddedAudioResolver.address(for: track, download: false)
+            return .stream(audio.url, duration: audio.duration)
         } catch is BotCheckError {
             throw BotCheckError()
         } catch let error as HTTPStatusError where error.code == 429 {
@@ -635,6 +659,18 @@ final class Player: ObservableObject {
 
     // MARK: the clock
 
+    private func updateStreamTiming(_ item: AVPlayerItem) {
+        let timing = StreamTiming(reported: item.duration.seconds, reference: streamDuration)
+        if streamEnd != timing.end {
+            streamEnd = timing.end
+            item.forwardPlaybackEndTime = timing.end.map { CMTime(seconds: $0, preferredTimescale: 600) } ?? .invalid
+        }
+        if timing.length > 0, abs(timing.length - length) > 0.5 {
+            length = timing.length
+            updateNowPlaying()
+        }
+    }
+
     private var sleepFade: Float {
         guard let sleepAt else { return 1 }
         let left = sleepAt.timeIntervalSinceNow
@@ -650,14 +686,8 @@ final class Player: ObservableObject {
             position = engine.currentTime
         case .stream:
             let seconds = CMTimeGetSeconds(stream.currentTime())
-            if seconds.isFinite { position = seconds }
-            if let d = stream.currentItem?.duration, d.isNumeric {
-                let total = CMTimeGetSeconds(d)
-                if total.isFinite, total > 0, abs(total - length) > 0.5 {
-                    length = total
-                    updateNowPlaying()
-                }
-            }
+            if let item = stream.currentItem { updateStreamTiming(item) }
+            if seconds.isFinite { position = min(seconds, streamEnd ?? seconds) }
         case .web:
             break
         case .none:

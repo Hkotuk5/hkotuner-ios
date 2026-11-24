@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -90,7 +91,11 @@ def resolve(address, *, download=False):
                 and "preview" not in (audio.get("format_id") or "").lower()
                 and https_url(audio.get("url"))
                 and (protocol.startswith("m3u8") or audio.get("ext") in {"m4a", "mp3", "aac"})):
-            return {"url": audio["url"], "format": audio.get("ext"), "protocol": protocol}
+            result = {"url": audio["url"], "format": audio.get("ext"), "protocol": protocol}
+            duration = info.get("duration")
+            if isinstance(duration, (int, float)) and math.isfinite(duration) and duration > 0:
+                result["duration"] = duration
+            return result
     raise ResolverError("no_audio_format")
 
 

@@ -4,11 +4,11 @@ enum PlaybackSource {
     /// a whole file on the phone
     case file(URL)
     /// a stream iOS reads itself (HLS), when the file could not be fetched
-    case stream(URL)
+    case stream(URL, duration: Double? = nil)
 
     var url: URL {
         switch self {
-        case .file(let url), .stream(let url): return url
+        case .file(let url), .stream(let url, _): return url
         }
     }
 }
