@@ -16,6 +16,14 @@ enum EmbeddedAudioResolver {
         let hls: Bool
         let duration: Double?
         let reuseDeadline: Date
+
+        init(url: URL, format: String?, hls: Bool, duration: Double? = nil) {
+            self.url = url
+            self.format = format
+            self.hls = hls
+            self.duration = duration
+            self.reuseDeadline = EmbeddedAudioResolver.reuseDeadline(for: url, from: Date())
+        }
     }
 
     static func reuseDeadline(for url: URL, from now: Date) -> Date {
@@ -37,7 +45,7 @@ enum EmbeddedAudioResolver {
             throw HKError("\(provider) не отдал аудиопоток")
         }
         return AudioAddress(url: url, format: response.format, hls: response.protocolName?.hasPrefix("m3u8") == true,
-                            duration: response.duration, reuseDeadline: reuseDeadline(for: url, from: Date()))
+                            duration: response.duration)
     }
 
     private struct Response: Decodable {
