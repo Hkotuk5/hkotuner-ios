@@ -2,6 +2,18 @@ import XCTest
 @testable import hkotuner
 
 final class SyncTests: XCTestCase {
+    func testDesktopAddressValidatesLocalIPv4AndPort() {
+        XCTAssertEqual(DesktopAddress(" 192.168.1.42:52200 ")?.text, "192.168.1.42:52200")
+        XCTAssertEqual(DesktopAddress("10.0.0.2")?.text, "10.0.0.2:48627")
+        XCTAssertNotNil(DesktopAddress("172.31.1.10:50000")?.endpoint)
+        XCTAssertNil(DesktopAddress("172.32.1.10:50000"))
+        XCTAssertNil(DesktopAddress("8.8.8.8:50000"))
+        XCTAssertNil(DesktopAddress("192.168.1.42:0"))
+        XCTAssertNil(DesktopAddress("192.168.1.42:65536"))
+        XCTAssertNil(DesktopAddress("192.168.31.999:48627"))
+        XCTAssertNil(DesktopAddress("192.168.1.42:48627/path"))
+    }
+
     func testRemoteUnlikeAndLocalPlaylistAdditionBothSurvive() {
         let a = Track.youtube(id: "aaaaaaaaaaa", title: "A", artist: "Artist")
         let b = Track.youtube(id: "bbbbbbbbbbb", title: "B", artist: "Artist")

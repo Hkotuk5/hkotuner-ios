@@ -99,6 +99,7 @@ struct ListenerProfileSettings: View {
 struct DeviceSettingsView: View {
     @ObservedObject private var sync = DeviceSync.shared
     @State private var code = ""
+    @State private var address = ""
     @State private var note: String?
 
     var body: some View {
@@ -139,7 +140,34 @@ struct DeviceSettingsView: View {
                     Text("На ПК открой настройки профиля и покажи QR-код или скопируй ключ. Затем подключи iPhone к той же сети.")
                 }
             }
+            if sync.paired {
+                Section {
+                    TextField("Адрес ПК", text: $address, prompt: Text("192.168.1.20:48627"))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textContentType(.URL)
+                        .keyboardType(.numbersAndPunctuation)
+                        .submitLabel(.done)
+                        .onSubmit { saveAddress() }
+                    if address != (sync.desktopAddress?.text ?? "") {
+                        Button("Сохранить адрес") { saveAddress() }
+                    }
+                } footer: {
+                    Text("Адрес указан в настройках профиля hkotuner на ПК. При смене адреса приложение попробует найти ПК автоматически.")
+                }
+            }
         }
         .navigationTitle("Синхронизация")
+        .onAppear { address = sync.desktopAddress?.text ?? "" }
+        .onChange(of: sync.desktopAddress) { address = $0?.text ?? "" }
+    }
+
+    private func saveAddress() {
+        do {
+            try sync.saveDesktopAddress(address)
+            address = sync.desktopAddress?.text ?? ""
+            note = nil
+            Task { await sync.sync() }
+        } catch { note = error.localizedDescription }
     }
 }

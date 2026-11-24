@@ -5,7 +5,7 @@ struct RootView: View {
     @EnvironmentObject private var library: LibraryStore
     @State private var showNowPlaying = false
     @State private var incoming: SharedPlaylist?
-    @State private var pairingKey: String?
+    @State private var pendingPairing: (key: String, address: String?)?
     @State private var confirmPairing = false
     @State private var tab = 0
 
@@ -25,17 +25,23 @@ struct RootView: View {
         .onOpenURL(perform: open)
         .confirmationDialog("Подключить этот компьютер?", isPresented: $confirmPairing, titleVisibility: .visible) {
             Button("Подключить") {
-                guard let pairingKey else { return }
-                defer { self.pairingKey = nil }
+                guard let pairing = pendingPairing else { return }
+                defer { pendingPairing = nil }
                 do {
-                    try DeviceSync.shared.pair(pairingKey)
+                    let sync = DeviceSync.shared
+                    try sync.pair(pairing.key, address: pairing.address)
                     Task {
-                        await DeviceSync.shared.sync()
-                        player.message = DeviceSync.shared.error ?? "Компьютер синхронизирован"
+                        let before = sync.lastSync
+                        await sync.sync()
+                        if sync.lastSync != before {
+                            player.message = "Компьютер синхронизирован"
+                        } else if let error = sync.error {
+                            player.message = error
+                        }
                     }
                 } catch { player.message = error.localizedDescription }
             }
-            Button("Отмена", role: .cancel) { pairingKey = nil }
+            Button("Отмена", role: .cancel) { pendingPairing = nil }
         } message: {
             Text("hkotuner будет обмениваться песнями, плейлистами, профилем и годовыми итогами в общей сети Wi-Fi.")
         }
@@ -57,8 +63,9 @@ struct RootView: View {
     /// a shared playlist: an hkotuner:// link from the share page, or a .hkplaylist file
     private func open(_ url: URL) {
         if url.scheme?.lowercased() == "hkotuner", url.host == "pair",
-           let key = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "key" })?.value {
-            pairingKey = key
+           let fields = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+           let key = fields.first(where: { $0.name == "key" })?.value {
+            pendingPairing = (key, fields.first(where: { $0.name == "address" })?.value)
             confirmPairing = true
             return
         }

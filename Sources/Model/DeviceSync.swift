@@ -21,6 +21,7 @@ final class DeviceSync: ObservableObject {
 
     @Published private(set) var profile: ListenerProfile?
     @Published private(set) var paired = false
+    @Published private(set) var desktopAddress: DesktopAddress?
     @Published private(set) var syncing = false
     @Published private(set) var lastSync: Date?
     @Published private(set) var error: String?
@@ -68,6 +69,9 @@ final class DeviceSync: ObservableObject {
         if let saved = load(Journal.self, from: journalURL) { journal = saved }
         key = PairingKey.read()
         paired = key != nil
+        if let key {
+            desktopAddress = UserDefaults.standard.string(forKey: Self.addressKey(key)).flatMap(DesktopAddress.init)
+        }
         if let key, journal.server == LanConnection.serviceLabel(key) {
             lastSync = journal.lastSync
             remoteListening = journal.remoteListening
@@ -88,25 +92,46 @@ final class DeviceSync: ObservableObject {
         self.profile = profile
     }
 
-    func pair(_ text: String) throws {
+    func pair(_ text: String, address: String? = nil) throws {
         let code = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard code.hasPrefix("hk1."), code.count == 47,
               let bytes = Data(base64Encoded: code.dropFirst(4).replacingOccurrences(of: "-", with: "+")
                 .replacingOccurrences(of: "_", with: "/") + "="), bytes.count == 32 else {
             throw HKError("Вставь ключ синхронизации, скопированный в hkotuner на ПК")
         }
-        guard key != bytes else { return }
-        try PairingKey.write(bytes)
-        key = bytes
-        paired = true
-        lastSync = nil
-        remoteListening = ListeningSummary()
+        let hint = address.flatMap(DesktopAddress.init)
+        if key != bytes {
+            try PairingKey.write(bytes)
+            key = bytes
+            paired = true
+            lastSync = nil
+            remoteListening = ListeningSummary()
+            desktopAddress = UserDefaults.standard.string(forKey: Self.addressKey(bytes)).flatMap(DesktopAddress.init)
+        }
+        if let hint { setAddress(hint, for: bytes) }
         error = nil
         schedule()
     }
 
+    func saveDesktopAddress(_ text: String) throws {
+        guard let key else { return }
+        let response = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let address = DesktopAddress(response)
+        guard response.isEmpty || address != nil else { throw HKError("Введи локальный IPv4-адрес и порт из настроек hkotuner на ПК.") }
+        setAddress(address, for: key)
+        error = nil
+    }
+
+    private static func addressKey(_ key: Data) -> String { "lan.address." + LanConnection.serviceLabel(key) }
+
+    private func setAddress(_ address: DesktopAddress?, for key: Data) {
+        UserDefaults.standard.set(address?.text, forKey: Self.addressKey(key))
+        desktopAddress = address
+    }
+
     func unpair() throws {
         try PairingKey.remove()
+        if let key { setAddress(nil, for: key) }
         key = nil
         paired = false
         lastSync = nil
@@ -149,7 +174,7 @@ final class DeviceSync: ObservableObject {
                         try persist(next)
                     }
                 }
-                let data = try await LanConnection(key: key).send(JSONEncoder().encode(sent))
+                let data = try await LanConnection(key: key, address: desktopAddress).send(JSONEncoder().encode(sent))
                 try Task.checkCancellation()
                 guard self.key == key else { return }
                 let reply = try JSONDecoder().decode(Response.self, from: data)
