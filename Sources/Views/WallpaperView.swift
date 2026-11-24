@@ -7,7 +7,7 @@ struct MotionImage: UIViewRepresentable {
     let data: Data
     var plays = true
 
-    func makeUIView(context: Context) -> FrameView { FrameView() }
+    func makeUIView(context: Context) -> FrameView { FrameView(frame: .zero) }
     func updateUIView(_ view: FrameView, context: Context) {
         view.load(data)
         view.setPlaying(plays)
@@ -19,7 +19,7 @@ struct MotionImage: UIViewRepresentable {
         private let picture = UIImageView()
         private var data: Data?
         private var source: CGImageSource?
-        private var frame = 0
+        private var frameIndex = 0
         private var nextFrame = 0.0
         private var timer: CADisplayLink?
         private var plays = true
@@ -47,7 +47,7 @@ struct MotionImage: UIViewRepresentable {
             guard data != bytes else { return }
             data = bytes
             source = CGImageSourceCreateWithData(bytes as CFData, nil)
-            frame = 0
+            frameIndex = 0
             nextFrame = 0
             draw()
             updateTimer()
@@ -73,10 +73,10 @@ struct MotionImage: UIViewRepresentable {
         @objc private func advance(_ link: CADisplayLink) {
             guard let source, link.timestamp >= nextFrame else { return }
             if nextFrame != 0 {
-                frame = (frame + 1) % CGImageSourceGetCount(source)
+                frameIndex = (frameIndex + 1) % CGImageSourceGetCount(source)
                 draw()
             }
-            let properties = CGImageSourceCopyPropertiesAtIndex(source, frame, nil) as? [CFString: Any]
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, frameIndex, nil) as? [CFString: Any]
             let gif = properties?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
             let delay = gif?[kCGImagePropertyGIFUnclampedDelayTime] as? Double
                 ?? gif?[kCGImagePropertyGIFDelayTime] as? Double ?? 0.1
@@ -91,7 +91,7 @@ struct MotionImage: UIViewRepresentable {
                 kCGImageSourceThumbnailMaxPixelSize: 1280,
                 kCGImageSourceShouldCache: false
             ] as [CFString: Any]
-            picture.image = CGImageSourceCreateThumbnailAtIndex(source, frame, options as CFDictionary)
+            picture.image = CGImageSourceCreateThumbnailAtIndex(source, frameIndex, options as CFDictionary)
                 .map { UIImage(cgImage: $0) }
         }
     }
