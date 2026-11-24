@@ -19,6 +19,7 @@ struct SettingsView: View {
     @State private var note: String?
     @State private var configChecked: Date?
     @State private var signingIn = false
+    @State private var chooseDevice = false
     @State private var confirmSignOut = false
     @AppStorage("web.mode") private var webMode = "auto"
     @AppStorage("web.site") private var webSite = "music"
@@ -40,6 +41,9 @@ struct SettingsView: View {
             webPlayerSection
 
             Section("Звук") {
+                Button { chooseDevice = true } label: {
+                    Label("Устройства воспроизведения", systemImage: "airplay.audio")
+                }
                 NavigationLink { EqualizerView() } label: {
                     LabeledContent("Эквалайзер", value: audio.eqOn ? audio.presetName : "выключен")
                 }
@@ -159,6 +163,7 @@ struct SettingsView: View {
             configChecked = ClientConfigStore.shared.lastChecked
         }
         .sheet(isPresented: $signingIn) { SignInView() }
+        .sheet(isPresented: $chooseDevice) { PlaybackDevicePicker() }
         .confirmationDialog("Выйти из YouTube Music?", isPresented: $confirmSignOut, titleVisibility: .visible) {
             Button("Выйти", role: .destructive) { account.signOut() }
         } message: {

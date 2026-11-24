@@ -100,21 +100,43 @@ actor LyricsService {
     private static func seconds(_ stamp: Substring) -> Double? {
         let parts = stamp.split(separator: ":")
         guard parts.count == 2, let m = Double(parts[0]), let s = Double(parts[1]) else { return nil }
-        return m * 60 + s
+        let time = m * 60 + s
+        return time.isFinite && time >= 0 ? time : nil
+    }
+
+    /// Split a shared timestamp among its rows in their original order.
+    static func displayTimeline(_ lines: [LyricLine], duration: Double) -> [LyricLine] {
+        var timed = lines
+        var start = lines.startIndex
+        while start < lines.endIndex {
+            let time = lines[start].time
+            var end = start + 1
+            while end < lines.endIndex, lines[end].time == time { end += 1 }
+            if end > start + 1 {
+                let span = lineSpan(lines[start], in: lines, duration: duration)
+                for index in (start + 1)..<end {
+                    let line = lines[index]
+                    let offset = span * Double(index - start) / Double(end - start)
+                    timed[index] = LyricLine(id: line.id, time: time + offset, text: line.text)
+                }
+            }
+            start = end
+        }
+        return timed
     }
 
     /// Length of the highlight sweep for a line from a line-timed transcript.
     static func lineSpan(_ line: LyricLine, in lines: [LyricLine], duration: Double) -> Double {
         let next = lines.first { $0.time > line.time }?.time
-        let end = next ?? (duration.isFinite && duration > line.time ? duration : line.time + 3)
-        return max(0.1, end - line.time)
+        if let next { return next - line.time }
+        return duration.isFinite && duration > line.time ? duration - line.time : 3
     }
 
     /// the line being sung at `time`
     static func current(_ lines: [LyricLine], at time: Double) -> Int? {
         var found: Int?
         for line in lines {
-            if line.time <= time + 0.2 { found = line.id } else { break }
+            if line.time <= time { found = line.id } else { break }
         }
         return found
     }

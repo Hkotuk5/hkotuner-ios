@@ -211,6 +211,18 @@ final class AccountAndLyricsTests: XCTestCase {
         XCTAssertEqual(LyricsService.lineSpan(lines[2], in: lines, duration: .infinity), 3)
     }
 
+    func testLyricRowsSharingATimestampAppearInOrder() {
+        let parsed = LyricsService.parseSynced("[00:01.00]Первая\n[00:01.00]Вторая\n[00:05.00]Дальше")
+        let timeline = LyricsService.displayTimeline(parsed, duration: 9)
+        XCTAssertEqual(timeline.map(\.text), ["Первая", "Вторая", "Дальше"])
+        XCTAssertEqual(timeline.map(\.time), [1, 3, 5])
+        XCTAssertEqual(LyricsService.current(timeline, at: 2.95), 0)
+        XCTAssertEqual(LyricsService.current(timeline, at: 3), 1)
+
+        let ending = LyricsService.displayTimeline(Array(parsed.prefix(2)), duration: 7)
+        XCTAssertEqual(ending.map(\.time), [1, 4])
+    }
+
     func testVersions() {
         XCTAssertTrue(Updates.newer("0.10.0", than: "0.9.2"))
         XCTAssertFalse(Updates.newer("0.2.0", than: "0.2"))

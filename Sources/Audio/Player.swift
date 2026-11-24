@@ -36,9 +36,17 @@ final class Player: ObservableObject {
     @Published private(set) var viaWeb = false
     /// YouTube's page is showing an ad
     @Published private(set) var webAd = false
+    @Published private(set) var desktop: DesktopPlaybackDevice?
 
-    var current: Track? { queue.indices.contains(index) ? queue[index] : nil }
-    var upcoming: [Track] { queue.indices.contains(index + 1) ? Array(queue[(index + 1)...]) : [] }
+    var current: Track? {
+        if let desktop { return desktop.state.track }
+        return queue.indices.contains(index) ? queue[index] : nil
+    }
+
+    var upcoming: [Track] {
+        guard desktop == nil, queue.indices.contains(index + 1) else { return [] }
+        return Array(queue[(index + 1)...])
+    }
 
     let engine = EnginePlayer()
     private let stream = AVPlayer()
@@ -52,6 +60,9 @@ final class Player: ObservableObject {
     private var loadTask: Task<Void, Never>?
     private typealias StreamRequest = Task<EmbeddedAudioResolver.AudioAddress, Error>
     private var preparedStream: (id: String, url: String, request: StreamRequest)?
+    private var desktopPoll: Task<Void, Never>?
+    private var desktopCommand: Task<Void, Never>?
+    private var desktopUpdatedAt = Date()
     private var extending = false
     private var failures = 0
     private var artwork: MPMediaItemArtwork?
@@ -146,6 +157,10 @@ final class Player: ObservableObject {
     /// plays a list from one of its songs (a playlist, likes, history)
     func play(_ tracks: [Track], at start: Int = 0) {
         guard tracks.indices.contains(start) else { return }
+        if desktop != nil {
+            startOnDesktop(Array(tracks[start...]))
+            return
+        }
         isWave = false
         queue = tracks
         index = start
@@ -154,6 +169,10 @@ final class Player: ObservableObject {
 
     /// a song picked in search: similar songs follow it, not the next result
     func playSingle(_ track: Track) {
+        if desktop != nil {
+            startOnDesktop([track])
+            return
+        }
         isWave = false
         autoContinue = true
         queue = [track]
@@ -167,6 +186,7 @@ final class Player: ObservableObject {
     }
 
     func playNext(_ track: Track) {
+        guard desktop == nil else { message = "Очередью компьютера можно управлять на ПК."; return }
         guard let now = current else { return playSingle(track) }
         queue.removeAll { $0.id == track.id && $0.id != now.id }
         if let i = queue.firstIndex(where: { $0.id == now.id }) { index = i }
@@ -175,6 +195,7 @@ final class Player: ObservableObject {
     }
 
     func addToQueue(_ tracks: [Track]) {
+        guard desktop == nil else { message = "Очередью компьютера можно управлять на ПК."; return }
         guard current != nil else { return play(tracks) }
         let known = Set(queue.map(\.id))
         queue.append(contentsOf: tracks.filter { !known.contains($0.id) })
@@ -224,6 +245,11 @@ final class Player: ObservableObject {
                 let radio = try await YTMusic.radio(videoId: id)
                 let fresh = self.filterForRadio(radio, skipping: [])
                 guard !fresh.isEmpty else { throw HKError("Волна пустая, попробуй ещё раз") }
+                if self.desktop != nil {
+                    self.startOnDesktop(Array(fresh.shuffled().prefix(24)))
+                    self.isLoading = false
+                    return
+                }
                 self.isWave = true
                 self.queue = Array(fresh.shuffled().prefix(25))
                 self.index = 0
@@ -238,6 +264,7 @@ final class Player: ObservableObject {
     // MARK: controls
 
     func toggle() {
+        if desktop != nil { sendToDesktop(.toggle); return }
         switch backend {
         case .none:
             if current != nil && !isLoading { load(startAt: resumeAt) }
@@ -251,6 +278,7 @@ final class Player: ObservableObject {
     }
 
     func pause() {
+        if desktop != nil { sendToDesktop(.pause); return }
         switch backend {
         case .engine: engine.pause()
         case .stream: stream.pause()
@@ -280,6 +308,7 @@ final class Player: ObservableObject {
     }
 
     func next() {
+        if desktop != nil { sendToDesktop(.next); return }
         if index + 1 < queue.count {
             index += 1
             load()
@@ -303,6 +332,7 @@ final class Player: ObservableObject {
     }
 
     func previous() {
+        if desktop != nil { sendToDesktop(.previous); return }
         if position > 3 || index == 0 {
             seek(to: 0)
         } else {
@@ -312,6 +342,10 @@ final class Player: ObservableObject {
     }
 
     func seek(to seconds: Double) {
+        if desktop != nil {
+            if seconds.isFinite { sendToDesktop(.seek(max(0, seconds))) }
+            return
+        }
         position = seconds
         switch backend {
         case .engine: engine.seek(to: seconds)
@@ -325,6 +359,143 @@ final class Player: ObservableObject {
     func cycleRepeat() {
         let all = Repeat.allCases
         repeatMode = all[(all.firstIndex(of: repeatMode)! + 1) % all.count]
+    }
+
+    // MARK: listening on the computer
+
+    func listen(on device: DesktopPlaybackDevice) async throws {
+        guard device.id != desktop?.id else { return }
+        let oldDesktop = desktop
+        let active = isPlaying || isLoading
+        var selected = device
+        if active, let track = current {
+            let following = desktop == nil ? upcoming : []
+            guard let action = Self.desktopStart([track] + following, at: position) else {
+                throw HKError("Для переноса на ПК выбери трек YouTube или SoundCloud.")
+            }
+            selected = try await deliver(action, to: device.id)
+            if let oldDesktop { _ = try? await deliver(.pause, to: oldDesktop.id) }
+        }
+        if desktop == nil {
+            resumeAt = position
+            saveSession()
+        }
+        loadTask?.cancel()
+        preparedStream?.request.cancel()
+        preparedStream = nil
+        desktopPoll?.cancel()
+        desktopCommand?.cancel()
+        stopBackends()
+        throughEngine = false
+        isWave = false
+        showDesktop(selected)
+        updateNowPlaying()
+        desktopPoll = Task { await monitorDesktop(device.id) }
+    }
+
+    func continueOnPhone() async throws {
+        guard let device = desktop else { return }
+        let state = try await deliver(.pause, to: device.id).state
+        leaveDesktop()
+        if let track = state.track {
+            if let existing = queue.firstIndex(where: { $0.id == track.id }) {
+                index = existing
+            } else {
+                queue = [track]
+                index = 0
+            }
+            let resume = state.duration > 0 ? min(state.position, max(0, state.duration - 0.5)) : state.position
+            load(startAt: resume)
+        }
+    }
+
+    private static func desktopStart(_ tracks: [Track], at position: Double) -> DesktopPlaybackAction? {
+        guard let first = tracks.first, first.isYouTube || first.isSoundCloud else { return nil }
+        let portable = tracks.lazy.filter { $0.isYouTube || $0.isSoundCloud }.prefix(24)
+        return .start(Array(portable), at: position.isFinite ? max(0, position) : 0)
+    }
+
+    private func startOnDesktop(_ tracks: [Track]) {
+        guard let action = Self.desktopStart(tracks, at: 0) else {
+            message = "Этот трек доступен только на iPhone."
+            return
+        }
+        sendToDesktop(action)
+    }
+
+    private func sendToDesktop(_ action: DesktopPlaybackAction) {
+        guard let device = desktop else { return }
+        let prior = desktopCommand
+        desktopCommand = Task {
+            await prior?.value
+            guard !Task.isCancelled, desktop?.id == device.id else { return }
+            do {
+                _ = try await DeviceSync.shared.desktopPlayback(.command(action, to: device.id))
+            } catch {
+                if !Task.isCancelled, desktop?.id == device.id { message = error.localizedDescription }
+            }
+        }
+    }
+
+    private func deliver(_ action: DesktopPlaybackAction, to device: String) async throws -> DesktopPlaybackDevice {
+        let sync = DeviceSync.shared
+        let sent = try await sync.desktopPlayback(.command(action, to: device))
+        guard let sequence = sent.sequence else { throw HKError("ПК не принял команду.") }
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(10)
+        repeat {
+            let response = try await sync.desktopPlayback(.devices)
+            guard let computer = response.devices?.first(where: { $0.id == device }) else {
+                throw HKError("Компьютер уже не в сети.")
+            }
+            if computer.acknowledged >= sequence { return computer }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        } while clock.now < deadline
+        throw HKError("ПК не подтвердил переключение.")
+    }
+
+    private func monitorDesktop(_ id: String) async {
+        var lastContact = Date()
+        while !Task.isCancelled, desktop?.id == id {
+            do {
+                let response = try await DeviceSync.shared.desktopPlayback(.devices)
+                guard !Task.isCancelled, desktop?.id == id else { return }
+                guard let device = response.devices?.first(where: { $0.id == id }) else { break }
+                showDesktop(device)
+                lastContact = Date()
+            } catch {
+                guard !Task.isCancelled, desktop?.id == id else { return }
+                if Date().timeIntervalSince(lastContact) >= 15 || DeviceSync.shared.onlineUsername == nil { break }
+            }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
+        if !Task.isCancelled, desktop?.id == id {
+            leaveDesktop()
+            message = "Связь с компьютером потеряна."
+        }
+    }
+
+    private func showDesktop(_ device: DesktopPlaybackDevice) {
+        if desktop != device { desktop = device }
+        let state = device.state
+        desktopUpdatedAt = Date()
+        position = state.position
+        length = state.duration
+        isPlaying = state.playing
+        isLoading = state.loading
+    }
+
+    private func leaveDesktop() {
+        desktopPoll?.cancel()
+        desktopPoll = nil
+        desktopCommand?.cancel()
+        desktopCommand = nil
+        desktop = nil
+        isPlaying = false
+        isLoading = false
+        position = resumeAt ?? 0
+        length = current?.duration ?? 0
+        updateNowPlaying()
     }
 
     // MARK: sleep timer
@@ -667,6 +838,7 @@ final class Player: ObservableObject {
         defer { extending = false }
         do {
             let radio = try await YTMusic.radio(videoId: seed)
+            guard !Task.isCancelled, desktop == nil else { return }
             let fresh = filterForRadio(radio, skipping: Set(queue.map(\.id)))
             queue.append(contentsOf: fresh.prefix(20))
             prefetchNext()
@@ -728,6 +900,13 @@ final class Player: ObservableObject {
         let now = Date()
         let delta = min(2, now.timeIntervalSince(lastTick))
         lastTick = now
+        if let desktop {
+            if desktop.state.playing && !desktop.state.loading {
+                let at = desktop.state.position + max(0, now.timeIntervalSince(desktopUpdatedAt))
+                position = length > 0 ? min(at, length) : at
+            }
+            return
+        }
         switch backend {
         case .engine:
             position = engine.currentTime
@@ -773,6 +952,7 @@ final class Player: ObservableObject {
     }
 
     func saveSession() {
+        guard desktop == nil else { return }
         guard !queue.isEmpty else {
             UserDefaults.standard.removeObject(forKey: "session.v1")
             return
@@ -866,7 +1046,7 @@ final class Player: ObservableObject {
     }
 
     private func updateNowPlaying() {
-        guard let track = current else {
+        guard desktop == nil, let track = current else {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return
         }

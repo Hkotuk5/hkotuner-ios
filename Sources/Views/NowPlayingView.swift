@@ -14,6 +14,7 @@ struct NowPlayingView: View {
     @State private var pane = Pane.cover
     @State private var showEqualizer = false
     @State private var showArtist = false
+    @State private var chooseDevice = false
     @State private var swipe: CGFloat = 0
 
     var body: some View {
@@ -47,11 +48,11 @@ struct NowPlayingView: View {
                 Scrubber(
                     position: player.position,
                     length: player.length,
-                    note: player.viaWeb
+                    note: player.desktop?.name ?? (player.viaWeb
                         ? (player.webAd ? "реклама" : "через YouTube")
                         : (!player.throughEngine && !player.isLoading
                            ? (track.isSoundCloud ? "SoundCloud" : (track.isYouTube || track.isAudioStream ? "поток" : nil))
-                           : nil),
+                           : nil)),
                     onSeek: { player.seek(to: $0) }
                 )
                 .padding(.top, 14)
@@ -70,6 +71,13 @@ struct NowPlayingView: View {
         .background { backdrop }
         .overlay(alignment: .top) { Toast() }
         .presentationDragIndicator(.hidden)
+        .onChange(of: player.desktop?.id) { id in
+            if id != nil && pane == .queue { pane = .cover }
+        }
+        .sheet(isPresented: $chooseDevice) {
+            PlaybackDevicePicker()
+                .presentationDetents([.medium, .large])
+        }
         .sheet(isPresented: $picking) {
             if let track = player.current { PlaylistPicker(tracks: [track]) }
         }
@@ -137,13 +145,20 @@ struct NowPlayingView: View {
                 Text(player.isWave ? "Моя волна" : "Сейчас играет")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(Theme.ink)
-                if !player.isWave && player.queue.count > 1 {
+                if !player.isWave && player.desktop == nil && player.queue.count > 1 {
                     Text("\(player.index + 1) из \(player.queue.count)")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(Theme.muted)
                 }
             }
             Spacer()
+            Button { chooseDevice = true } label: {
+                Image(systemName: player.desktop == nil ? "airplay.audio" : "desktopcomputer")
+                    .foregroundStyle(player.desktop == nil ? Theme.ink : Theme.accent)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Устройства воспроизведения")
             if let track = player.current {
                 moreMenu(track)
             } else {
@@ -313,11 +328,13 @@ struct NowPlayingView: View {
                 barItem(active: player.sleepAt != nil || player.sleepAfterTrack) { sleepLabel }
             }
             .accessibilityLabel("Таймер сна")
+            .disabled(player.desktop != nil)
             Button { showEqualizer = true } label: {
                 barItem(active: audio.eqOn) { Image(systemName: "slider.vertical.3") }
             }
             .accessibilityLabel("Эквалайзер")
             paneButton(.queue, "list.bullet", "Очередь")
+                .disabled(player.desktop != nil)
         }
         .font(.system(size: 18, weight: .medium))
         .foregroundStyle(Theme.ink)
@@ -444,6 +461,7 @@ struct LyricsPane: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let track: Track
     @State private var lyrics: Lyrics?
+    @State private var originalLines: [LyricLine] = []
     @State private var lines: [LyricLine] = []
     @State private var loading = true
 
@@ -471,8 +489,12 @@ struct LyricsPane: View {
             let found = await LyricsService.shared.find(track)
             guard !Task.isCancelled else { return }
             lyrics = found
-            lines = found?.synced.map(LyricsService.parseSynced) ?? []
+            originalLines = found?.synced.map(LyricsService.parseSynced) ?? []
+            lines = LyricsService.displayTimeline(originalLines, duration: player.length)
             loading = false
+        }
+        .onChange(of: player.length) { length in
+            lines = LyricsService.displayTimeline(originalLines, duration: length)
         }
     }
 
@@ -558,6 +580,7 @@ private struct LyricHighlight: View {
     let span: Double
     let playing: Bool
     @State private var paintedOffset: Double
+    @ScaledMetric(relativeTo: .title3) private var fontSize: CGFloat = 20
 
     init(text: String, offset: Double, span: Double, playing: Bool) {
         self.text = text
@@ -568,8 +591,9 @@ private struct LyricHighlight: View {
     }
 
     var body: some View {
-        Text(text)
-            .modifier(LyricShimmer(progress: min(1, max(0, paintedOffset / span))))
+        LyricSweep(text: text, fontSize: fontSize, color: Theme.ink,
+                   progress: min(1, max(0, paintedOffset / span)))
+            .accessibilityLabel(text)
             .onChange(of: offset) { updated in
                 let step = updated - paintedOffset
                 let advance = playing && step > 0 && step <= 0.85
@@ -577,26 +601,6 @@ private struct LyricHighlight: View {
                     paintedOffset = updated
                 }
             }
-    }
-}
-
-private struct LyricShimmer: AnimatableModifier {
-    var progress: Double
-    var animatableData: Double {
-        get { progress }
-        set { progress = newValue }
-    }
-
-    func body(content: Content) -> some View {
-        // Keep the highlight soft as it passes over letters and wrapped lines.
-        let edge = progress * 1.2 - 0.1
-        func location(_ offset: Double) -> CGFloat { CGFloat(min(1, max(0, edge + offset))) }
-        return content.foregroundStyle(LinearGradient(stops: [
-            .init(color: Theme.ink, location: location(-0.075)),
-            .init(color: Theme.ink, location: location(-0.03)),
-            .init(color: Theme.accent, location: location(0)),
-            .init(color: Theme.ink.opacity(0.62), location: location(0.09))
-        ], startPoint: .topLeading, endPoint: .bottomTrailing))
     }
 }
 

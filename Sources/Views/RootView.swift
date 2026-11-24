@@ -52,14 +52,14 @@ struct RootView: View {
         content
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 ZStack {
-                    if player.current != nil {
+                    if player.current != nil || player.desktop != nil {
                         MiniPlayer { showNowPlaying = true }
                             .padding(.horizontal, 10)
                             .padding(.bottom, 6)
                             .transition(.opacity.combined(with: .offset(y: 12)))
                     }
                 }
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: player.current != nil)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: player.current != nil || player.desktop != nil)
             }
             .tabItem { Label(title, systemImage: icon) }
             .tag(tag)
@@ -182,6 +182,14 @@ struct MiniPlayer: View {
             .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
             .contentShape(Rectangle())
             .onTapGesture(perform: open)
+        } else if let desktop = player.desktop {
+            Button(action: open) {
+                Label(desktop.name, systemImage: "desktopcomputer")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .glassCard(radius: 20)
+            }
+            .buttonStyle(.plain)
         }
     }
 }

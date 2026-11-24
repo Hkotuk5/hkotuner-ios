@@ -194,6 +194,13 @@ final class DeviceSync: ObservableObject {
         try? BGTaskScheduler.shared.submit(task)
     }
 
+    func desktopPlayback(_ request: DesktopPlaybackRequest) async throws -> DesktopPlaybackReply {
+        guard let account = online else { throw HKError("Войди в онлайн-аккаунт hkotuner.") }
+        let reply = try await account.playback(request)
+        guard account == online else { throw CancellationError() }
+        return reply
+    }
+
     func sync() async {
         let account = online
         let localKey = onlineSelected ? nil : key

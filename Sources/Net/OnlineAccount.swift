@@ -89,6 +89,12 @@ struct OnlineAccount: Codable, Equatable {
         return try await Self.send("sync", server: server, token: token, body: payload)
     }
 
+    func playback(_ command: DesktopPlaybackRequest) async throws -> DesktopPlaybackReply {
+        let body = try JSONEncoder().encode(command)
+        let response = try await Self.send("playback", server: server, token: token, body: body)
+        return try JSONDecoder().decode(DesktopPlaybackReply.self, from: response)
+    }
+
     func signOut() async throws {
         _ = try await Self.send("logout", server: server, token: token, body: nil)
     }
@@ -96,6 +102,7 @@ struct OnlineAccount: Codable, Equatable {
     private static func send(_ action: String, server: URL, token: String?, body: Data?) async throws -> Data {
         var request = URLRequest(url: server.appendingPathComponent("v1").appendingPathComponent(action))
         request.httpMethod = "POST"
+        if action == "playback" { request.timeoutInterval = 8 }
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -106,6 +113,12 @@ struct OnlineAccount: Codable, Equatable {
         switch status {
         case 200, 204: return data
         case 401: throw token == nil ? Failure.credentials : Failure.expired
+        case 404 where action == "playback":
+            if let error = try? JSONDecoder().decode([String: String].self, from: data),
+               error["error"] == "device_unavailable" {
+                throw HKError("Компьютер уже не в сети.")
+            }
+            throw HKError("Для выбора ПК обнови сервер hkotuner.")
         case 409: throw Failure.tooManyDevices
         case 413: throw Failure.tooLarge
         case 429: throw Failure.tooManyAttempts
