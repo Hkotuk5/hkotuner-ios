@@ -27,6 +27,9 @@ struct SettingsView: View {
         List {
             Section("Профиль") {
                 ListenerProfileSettings()
+                NavigationLink { OnlineAccountView() } label: {
+                    Label("Онлайн-аккаунт", systemImage: "cloud")
+                }
                 NavigationLink { DeviceSettingsView() } label: {
                     Label("Синхронизация", systemImage: "arrow.triangle.2.circlepath")
                 }

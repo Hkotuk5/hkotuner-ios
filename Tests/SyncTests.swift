@@ -2,6 +2,13 @@ import XCTest
 @testable import hkotuner
 
 final class SyncTests: XCTestCase {
+    func testOnlineEndpointRequiresAnHTTPSOrigin() throws {
+        XCTAssertEqual(try OnlineAccount.endpoint("SYNC.example.com:443/").absoluteString, "https://sync.example.com")
+        XCTAssertThrowsError(try OnlineAccount.endpoint("http://sync.example.com"))
+        XCTAssertThrowsError(try OnlineAccount.endpoint("https://name:secret@sync.example.com"))
+        XCTAssertThrowsError(try OnlineAccount.endpoint("https://sync.example.com/api?account=other"))
+    }
+
     func testDesktopAddressValidatesLocalIPv4AndPort() {
         XCTAssertEqual(DesktopAddress(" 192.168.1.42:52200 ")?.text, "192.168.1.42:52200")
         XCTAssertEqual(DesktopAddress("10.0.0.2")?.text, "10.0.0.2:48627")

@@ -21,6 +21,8 @@ final class DeviceSync: ObservableObject {
 
     @Published private(set) var profile: ListenerProfile?
     @Published private(set) var paired = false
+    @Published private(set) var onlineUsername: String?
+    @Published private(set) var onlineServer: String?
     @Published private(set) var desktopAddress: DesktopAddress?
     @Published private(set) var syncing = false
     @Published private(set) var lastSync: Date?
@@ -58,7 +60,12 @@ final class DeviceSync: ObservableObject {
     private let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     private var journal = Journal()
     private var key: Data?
-    private var journalURL: URL { folder.appendingPathComponent("lan-sync.json") }
+    private var online: OnlineAccount?
+    private var onlineSelected = UserDefaults.standard.bool(forKey: "sync.onlineSelected")
+    private var journalURL: URL {
+        let name = online.map { "\($0.identity).json" } ?? "lan-sync.json"
+        return folder.appendingPathComponent(name)
+    }
     private var profileURL: URL { folder.appendingPathComponent("profile.json") }
 
     private init() {
@@ -66,16 +73,48 @@ final class DeviceSync: ObservableObject {
         if profile == nil, let name = UserDefaults.standard.string(forKey: "profile.name"), !name.isEmpty {
             profile = ListenerProfile(name: name, avatar: nil)
         }
-        if let saved = load(Journal.self, from: journalURL) { journal = saved }
+        online = OnlineAccount.load()
+        onlineUsername = online?.username
+        onlineServer = online?.server.absoluteString
         key = PairingKey.read()
         paired = key != nil
         if let key {
             desktopAddress = UserDefaults.standard.string(forKey: Self.addressKey(key)).flatMap(DesktopAddress.init)
         }
-        if let key, journal.server == LanConnection.serviceLabel(key) {
-            lastSync = journal.lastSync
-            remoteListening = journal.remoteListening
-        }
+        restoreJournal()
+    }
+
+    private func restoreJournal() {
+        journal = load(Journal.self, from: journalURL) ?? Journal()
+        let label = online?.identity ?? (onlineSelected ? nil : key.map(LanConnection.serviceLabel))
+        lastSync = journal.server == label ? journal.lastSync : nil
+        remoteListening = journal.server == label ? journal.remoteListening : ListeningSummary()
+    }
+
+    func signInOnline(server: String, username: String, password: String) async throws {
+        let account = try await OnlineAccount.signIn(server: server, username: username, password: password)
+        try Task.checkCancellation()
+        try account.save()
+        onlineSelected = true
+        UserDefaults.standard.set(true, forKey: "sync.onlineSelected")
+        setOnline(account)
+        schedule()
+    }
+
+    func signOutOnline() async throws {
+        guard let account = online else { return }
+        try OnlineAccount.remove()
+        setOnline(nil)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshID)
+        try await account.signOut()
+    }
+
+    private func setOnline(_ account: OnlineAccount?) {
+        online = account
+        onlineUsername = account?.username
+        onlineServer = account?.server.absoluteString
+        restoreJournal()
+        error = nil
     }
 
     func saveProfile(name: String, avatar: String?) throws {
@@ -93,6 +132,7 @@ final class DeviceSync: ObservableObject {
     }
 
     func pair(_ text: String, address: String? = nil) throws {
+        guard online == nil else { throw HKError("Выйди из онлайн-аккаунта перед подключением к локальной сети") }
         let code = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard code.hasPrefix("hk1."), code.count == 47,
               let bytes = Data(base64Encoded: code.dropFirst(4).replacingOccurrences(of: "-", with: "+")
@@ -109,6 +149,11 @@ final class DeviceSync: ObservableObject {
             desktopAddress = UserDefaults.standard.string(forKey: Self.addressKey(bytes)).flatMap(DesktopAddress.init)
         }
         if let hint { setAddress(hint, for: bytes) }
+        if onlineSelected {
+            onlineSelected = false
+            UserDefaults.standard.set(false, forKey: "sync.onlineSelected")
+            restoreJournal()
+        }
         error = nil
         schedule()
     }
@@ -134,25 +179,28 @@ final class DeviceSync: ObservableObject {
         if let key { setAddress(nil, for: key) }
         key = nil
         paired = false
-        lastSync = nil
-        remoteListening = ListeningSummary()
-        error = nil
-        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshID)
+        if online == nil {
+            lastSync = nil
+            remoteListening = ListeningSummary()
+            error = nil
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshID)
+        }
     }
 
     func schedule() {
-        guard paired else { return }
+        guard online != nil || (paired && !onlineSelected) else { return }
         let task = BGAppRefreshTaskRequest(identifier: Self.refreshID)
         task.earliestBeginDate = Date().addingTimeInterval(20 * 60)
         try? BGTaskScheduler.shared.submit(task)
     }
 
     func sync() async {
-        guard let key, !syncing else { return }
+        let account = online
+        let localKey = onlineSelected ? nil : key
+        guard let label = account?.identity ?? localKey.map(LanConnection.serviceLabel), !syncing else { return }
         syncing = true
         defer { syncing = false }
         do {
-            let label = LanConnection.serviceLabel(key)
             for _ in 0..<2 {
                 let library = SharedLibrary(LibraryStore.shared.library)
                 var next = journal
@@ -174,9 +222,15 @@ final class DeviceSync: ObservableObject {
                         try persist(next)
                     }
                 }
-                let data = try await LanConnection(key: key, address: desktopAddress).send(JSONEncoder().encode(sent))
+                let payload = try JSONEncoder().encode(sent)
+                let data: Data
+                if let account {
+                    data = try await account.exchange(payload)
+                } else if let localKey {
+                    data = try await LanConnection(key: localKey, address: desktopAddress).send(payload)
+                } else { return }
                 try Task.checkCancellation()
-                guard self.key == key else { return }
+                guard online == account, account != nil || (!onlineSelected && key == localKey) else { return }
                 let reply = try JSONDecoder().decode(Response.self, from: data)
                 let current = SharedLibrary(LibraryStore.shared.library)
                 let merged = SharedLibrary.merge(base: sent.library, local: reply.library, incoming: current)
@@ -198,8 +252,13 @@ final class DeviceSync: ObservableObject {
                 if merged == reply.library, profile == reply.profile { break }
             }
         } catch is CancellationError {
+        } catch OnlineAccount.Failure.expired {
+            guard online == account else { return }
+            try? OnlineAccount.remove()
+            setOnline(nil)
+            self.error = OnlineAccount.Failure.expired.localizedDescription
         } catch {
-            guard self.key == key else { return }
+            guard online == account, account != nil || (!onlineSelected && key == localKey) else { return }
             self.error = error.localizedDescription
         }
     }
