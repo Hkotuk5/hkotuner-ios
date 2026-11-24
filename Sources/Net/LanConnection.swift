@@ -58,7 +58,7 @@ final class LanConnection: @unchecked Sendable {
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self, connection == nil,
                   let service = results.first(where: {
-                      if case .service(let name, _, _, _) = $0.endpoint { return name == label }
+                      if case .service(let name, _, _, _) = $0.endpoint { return name == self.label }
                       return false
                   }) else { return }
             connect(service.endpoint, payload: payload)
@@ -102,7 +102,7 @@ final class LanConnection: @unchecked Sendable {
             guard let self else { return }
             finish(Result {
                 let box = try ChaChaPoly.SealedBox(combined: data)
-                return try ChaChaPoly.open(box, using: secret, authenticating: aad(1, challenge))
+                return try ChaChaPoly.open(box, using: self.secret, authenticating: self.aad(1, challenge))
             })
         }
     }

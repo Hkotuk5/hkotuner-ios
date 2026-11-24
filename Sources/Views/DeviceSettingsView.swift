@@ -1,5 +1,6 @@
 import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ListenerAvatar: View {
     let profile: ListenerProfile?
