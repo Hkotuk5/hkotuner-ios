@@ -63,7 +63,7 @@ private struct LyricDrawing: UIViewRepresentable {
                 paragraph.alignment = .natural
                 storage.setAttributedString(NSAttributedString(string: text, attributes: [
                     .font: font,
-                    .foregroundColor: color.withAlphaComponent(0.42),
+                    .foregroundColor: color,
                     .paragraphStyle: paragraph
                 ]))
             }
@@ -81,10 +81,13 @@ private struct LyricDrawing: UIViewRepresentable {
         }
 
         override func draw(_ rect: CGRect) {
-            guard bounds.width > 0, let context = UIGraphicsGetCurrentContext(), let color else { return }
+            guard bounds.width > 0, let context = UIGraphicsGetCurrentContext() else { return }
             measure(width: bounds.width)
             let glyphs = layoutManager.glyphRange(for: textContainer)
+            context.saveGState()
+            context.setAlpha(0.42)
             layoutManager.drawGlyphs(forGlyphRange: glyphs, at: .zero)
+            context.restoreGState()
             guard progress > 0, glyphs.length > 0 else { return }
             var lines: [CGRect] = []
             layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { _, used, _, _, _ in
@@ -98,14 +101,11 @@ private struct LyricDrawing: UIViewRepresentable {
                 path.addRect(part.insetBy(dx: 0, dy: -0.5))
                 remaining -= part.width
             }
-            let characters = NSRange(location: 0, length: storage.length)
-            layoutManager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: characters)
             context.saveGState()
             context.addPath(path)
             context.clip()
             layoutManager.drawGlyphs(forGlyphRange: glyphs, at: .zero)
             context.restoreGState()
-            layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: characters)
         }
     }
 }
