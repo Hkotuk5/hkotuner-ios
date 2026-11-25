@@ -18,11 +18,12 @@ struct ListenerProfile: Codable, Equatable {
 final class DeviceSync: ObservableObject {
     static let shared = DeviceSync()
     static let refreshID = "uk.hkot.hkotuner.lan-sync"
+    private static let guestKey = "sync.continueAsGuest"
 
     @Published private(set) var profile: ListenerProfile?
     @Published private(set) var paired = false
     @Published private(set) var onlineUsername: String?
-    @Published private(set) var onlineServer: String?
+    @Published private(set) var needsAccount = true
     @Published private(set) var desktopAddress: DesktopAddress?
     @Published private(set) var syncing = false
     @Published private(set) var lastSync: Date?
@@ -61,6 +62,9 @@ final class DeviceSync: ObservableObject {
     private var journal = Journal()
     private var key: Data?
     private var online: OnlineAccount?
+    private var scheduledOnlineSync: Task<Void, Never>?
+    private var onlineChangesPending = false
+    private var onlineAllowedAt = 0.0
     private var journalURL: URL {
         let name = online.map { "\($0.identity).json" } ?? "lan-sync.json"
         return folder.appendingPathComponent(name)
@@ -74,7 +78,7 @@ final class DeviceSync: ObservableObject {
         }
         online = OnlineAccount.load()
         onlineUsername = online?.username
-        onlineServer = online?.server.absoluteString
+        needsAccount = online == nil && !UserDefaults.standard.bool(forKey: Self.guestKey)
         key = PairingKey.read()
         paired = key != nil
         if let key {
@@ -96,21 +100,38 @@ final class DeviceSync: ObservableObject {
         try account.save()
         setOnline(account)
         schedule()
+        onlineChanged()
     }
 
     func signOutOnline() async throws {
         guard let account = online else { return }
         try OnlineAccount.remove()
-        setOnline(nil)
+        returnToSignIn()
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshID)
-        schedule()
         try await account.signOut()
     }
 
+    func continueAsGuest() {
+        guard online == nil else { return }
+        UserDefaults.standard.set(true, forKey: Self.guestKey)
+        needsAccount = false
+        error = nil
+        schedule()
+    }
+
+    private func returnToSignIn() {
+        UserDefaults.standard.set(false, forKey: Self.guestKey)
+        setOnline(nil)
+    }
+
     private func setOnline(_ account: OnlineAccount?) {
+        scheduledOnlineSync?.cancel()
+        scheduledOnlineSync = nil
+        onlineChangesPending = false
+        onlineAllowedAt = 0
         online = account
         onlineUsername = account?.username
-        onlineServer = account?.server.absoluteString
+        needsAccount = account == nil
         restoreJournal()
         error = nil
     }
@@ -121,7 +142,10 @@ final class DeviceSync: ObservableObject {
         }
         let cleaned = String(String.UnicodeScalarView(visible.prefix(32)))
         guard !cleaned.isEmpty else { throw HKError("Введи ник") }
-        try setProfile(ListenerProfile(name: cleaned, avatar: avatar))
+        let updated = ListenerProfile(name: cleaned, avatar: avatar)
+        guard updated != profile else { return }
+        try setProfile(updated)
+        onlineChanged()
     }
 
     private func setProfile(_ profile: ListenerProfile) throws {
@@ -181,7 +205,7 @@ final class DeviceSync: ObservableObject {
     }
 
     func schedule() {
-        guard online != nil || paired else { return }
+        guard !needsAccount, online != nil || paired else { return }
         let task = BGAppRefreshTaskRequest(identifier: Self.refreshID)
         task.earliestBeginDate = Date().addingTimeInterval(20 * 60)
         try? BGTaskScheduler.shared.submit(task)
@@ -194,14 +218,46 @@ final class DeviceSync: ObservableObject {
         return reply
     }
 
+    func onlineChanged() {
+        guard online != nil else { return }
+        onlineChangesPending = true
+        scheduleOnlineChanges()
+    }
+
+    private func scheduleOnlineChanges() {
+        guard online != nil, onlineChangesPending, scheduledOnlineSync == nil, !syncing else { return }
+        let delay = max(0.75, onlineAllowedAt - ProcessInfo.processInfo.systemUptime)
+        scheduledOnlineSync = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.scheduledOnlineSync = nil
+            await self.sync()
+        }
+    }
+
     func sync() async {
         let account = online
         let localKey = account == nil ? key : nil
-        guard let label = account?.identity ?? localKey.map(LanConnection.serviceLabel), !syncing else { return }
+        guard !needsAccount, let label = account?.identity ?? localKey.map(LanConnection.serviceLabel), !syncing else { return }
+        if account != nil {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now >= onlineAllowedAt else {
+                scheduleOnlineChanges()
+                return
+            }
+            scheduledOnlineSync?.cancel()
+            scheduledOnlineSync = nil
+            onlineChangesPending = false
+            onlineAllowedAt = now + 3
+        }
         syncing = true
-        defer { syncing = false }
+        defer {
+            syncing = false
+            scheduleOnlineChanges()
+        }
         do {
-            for _ in 0..<2 {
+            for _ in 0..<(account == nil ? 2 : 1) {
                 let library = SharedLibrary(LibraryStore.shared.library)
                 var next = journal
                 if next.server != label {
@@ -230,7 +286,7 @@ final class DeviceSync: ObservableObject {
                     data = try await LanConnection(key: localKey, address: desktopAddress).send(payload)
                 } else { return }
                 try Task.checkCancellation()
-                guard online == account, account != nil || key == localKey else { return }
+                guard !needsAccount, online == account, account != nil || key == localKey else { return }
                 let reply = try JSONDecoder().decode(Response.self, from: data)
                 let current = SharedLibrary(LibraryStore.shared.library)
                 let merged = SharedLibrary.merge(base: sent.library, local: reply.library, incoming: current)
@@ -249,17 +305,22 @@ final class DeviceSync: ObservableObject {
                 lastSync = next.lastSync
                 if remoteListening != reply.listening { remoteListening = reply.listening }
                 error = nil
+                if account != nil && (merged != reply.library || profile != reply.profile) { onlineChangesPending = true }
                 if merged == reply.library, profile == reply.profile { break }
             }
         } catch is CancellationError {
         } catch OnlineAccount.Failure.expired {
             guard online == account else { return }
             try? OnlineAccount.remove()
-            setOnline(nil)
-            schedule()
+            returnToSignIn()
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshID)
             self.error = OnlineAccount.Failure.expired.localizedDescription
         } catch {
-            guard online == account, account != nil || key == localKey else { return }
+            guard !needsAccount, online == account, account != nil || key == localKey else { return }
+            if account != nil {
+                onlineAllowedAt = ProcessInfo.processInfo.systemUptime + 25
+                onlineChangesPending = onlineChangesPending || journal.pending != nil
+            }
             self.error = error.localizedDescription
         }
     }

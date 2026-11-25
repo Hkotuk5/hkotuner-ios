@@ -1,7 +1,30 @@
+import Combine
 import XCTest
 @testable import hkotuner
 
 final class SyncTests: XCTestCase {
+    @MainActor
+    func testOnlyLocalSharedEditsTriggerSync() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("sync-\(UUID().uuidString).json")
+        let store = LibraryStore(fileURL: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        var changes = 0
+        let subscription = store.sharedChanges.sink { _ in changes += 1 }
+        defer { subscription.cancel() }
+
+        let song = Track.youtube(id: "aaaaaaaaaaa", title: "A", artist: "Artist")
+        store.pushHistory(song)
+        XCTAssertEqual(changes, 0)
+        store.createPlaylist("Local playlist", tracks: [song])
+        XCTAssertEqual(changes, 1)
+
+        var remote = SharedLibrary(store.library)
+        remote.liked = [song]
+        try store.applySync(remote)
+        XCTAssertEqual(store.library.liked, [song])
+        XCTAssertEqual(changes, 1)
+    }
+
     func testOnlineEndpointRequiresAnHTTPSOrigin() throws {
         XCTAssertEqual(try OnlineAccount.endpoint("SYNC.example.com:443/").absoluteString, "https://sync.example.com")
         XCTAssertThrowsError(try OnlineAccount.endpoint("http://sync.example.com"))

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 
@@ -10,6 +11,7 @@ final class LibraryStore: ObservableObject {
 
     @Published private(set) var library: Library
     @Published var lastError: String?
+    let sharedChanges = PassthroughSubject<Void, Never>()
 
     private let fileURL: URL
 
@@ -40,7 +42,9 @@ final class LibraryStore: ObservableObject {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted]
             try encoder.encode(copy).write(to: fileURL, options: .atomic)
+            let sharedChanged = library.liked != copy.liked || library.playlists != copy.playlists
             library = copy
+            if sharedChanged { sharedChanges.send(()) }
         } catch {
             lastError = "Не удалось сохранить библиотеку: \(error.localizedDescription)"
         }

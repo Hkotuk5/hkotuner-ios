@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct OnlineAccountView: View {
+    private let startScreen: Bool
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var sync = DeviceSync.shared
     @State private var username = ""
@@ -10,19 +11,20 @@ struct OnlineAccountView: View {
     @State private var working = false
     @State private var note: String?
 
+    init(startScreen: Bool = false) {
+        self.startScreen = startScreen
+    }
+
     var body: some View {
         List {
             if let current = sync.onlineUsername {
                 Section {
                     LabeledContent("Аккаунт", value: current)
-                    if let address = sync.onlineServer { LabeledContent("Сервер", value: address) }
-                    if let last = sync.lastSync {
+                    if sync.syncing {
+                        ProgressView("Синхронизация…")
+                    } else if let last = sync.lastSync {
                         LabeledContent("Последний обмен", value: last.formatted(date: .abbreviated, time: .shortened))
                     }
-                    Button(sync.syncing ? "Синхронизация…" : "Синхронизировать сейчас") {
-                        Task { await sync.sync() }
-                    }
-                    .disabled(sync.syncing || working)
                     Button("Выйти", role: .destructive) { signOut() }
                         .disabled(working)
                 }
@@ -49,7 +51,10 @@ struct OnlineAccountView: View {
                         : "При входе локальная медиатека, профиль и итоги объединятся с данными аккаунта.")
                 }
                 Section {
-                    Button("Продолжить без входа") { dismiss() }
+                    Button("Продолжить без входа") {
+                        sync.continueAsGuest()
+                        if !startScreen { dismiss() }
+                    }
                         .disabled(working)
                 } footer: {
                     Text("Локальная медиатека и синхронизация по Wi-Fi доступны без аккаунта.")
@@ -59,7 +64,7 @@ struct OnlineAccountView: View {
                 Text(message).font(.footnote).foregroundStyle(.secondary)
             }
         }
-        .navigationTitle("Онлайн-аккаунт")
+        .navigationTitle(startScreen ? "hkotuner" : "Онлайн-аккаунт")
         .onAppear {
             if let current = sync.onlineUsername { username = current }
         }

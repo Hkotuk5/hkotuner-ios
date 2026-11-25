@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 
@@ -27,6 +28,7 @@ final class StatsStore: ObservableObject {
     }
 
     @Published private var data = Saved()
+    let listeningChanges = PassthroughSubject<Void, Never>()
     private let fileURL: URL
     private var unsaved: Double = 0
 
@@ -109,7 +111,9 @@ final class StatsStore: ObservableObject {
     func save() {
         unsaved = 0
         prune()
-        try? JSONEncoder().encode(data).write(to: fileURL, options: .atomic)
+        if (try? JSONEncoder().encode(data).write(to: fileURL, options: .atomic)) != nil {
+            listeningChanges.send(())
+        }
     }
 
     func reset() {

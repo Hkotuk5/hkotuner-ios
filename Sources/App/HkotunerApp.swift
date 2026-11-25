@@ -28,13 +28,17 @@ struct HkotunerApp: App {
                 }
                 .task(id: phase) {
                     guard phase == .active else { return }
-                    DeviceSync.shared.schedule()
+                    let sync = DeviceSync.shared
+                    sync.schedule()
                     while !Task.isCancelled {
-                        await DeviceSync.shared.sync()
-                        do { try await Task.sleep(nanoseconds: 25_000_000_000) }
+                        await sync.sync()
+                        let delay: UInt64 = sync.onlineUsername == nil ? 25_000_000_000 : 10_000_000_000
+                        do { try await Task.sleep(nanoseconds: delay) }
                         catch { return }
                     }
                 }
+                .onReceive(library.sharedChanges) { _ in DeviceSync.shared.onlineChanged() }
+                .onReceive(StatsStore.shared.listeningChanges) { _ in DeviceSync.shared.onlineChanged() }
                 .onChange(of: phase) { now in
                     if now == .background {
                         player.saveSession()

@@ -4,6 +4,7 @@ struct RootView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var player: Player
     @EnvironmentObject private var library: LibraryStore
+    @ObservedObject private var sync = DeviceSync.shared
     @State private var showNowPlaying = false
     @State private var incoming: SharedPlaylist?
     @State private var pendingPairing: (key: String, address: String?)?
@@ -11,6 +12,17 @@ struct RootView: View {
     @State private var tab = 0
 
     var body: some View {
+        Group {
+            if sync.needsAccount {
+                NavigationStack { OnlineAccountView(startScreen: true) }
+            } else {
+                libraryTabs
+            }
+        }
+        .onOpenURL(perform: open)
+    }
+
+    private var libraryTabs: some View {
         TabView(selection: $tab) {
             screen(HomeView(), "Главная", "house.fill", 0)
             screen(SearchView(), "Поиск", "magnifyingglass", 1)
@@ -23,7 +35,6 @@ struct RootView: View {
             IncomingPlaylistView(shared: shared)
         }
         .overlay(alignment: .top) { Toast() }
-        .onOpenURL(perform: open)
         .confirmationDialog("Подключить этот компьютер?", isPresented: $confirmPairing, titleVisibility: .visible) {
             Button("Подключить") {
                 guard let pairing = pendingPairing else { return }
