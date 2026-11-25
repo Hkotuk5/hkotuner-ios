@@ -20,6 +20,7 @@ actor AudioCache {
     static let cacheLimit: Int64 = 600 << 20
 
     private var inflight: [String: Task<PlaybackSource, Error>] = [:]
+    private var transfers: [String: Task<URL, Error>] = [:]
 
     static let cacheDir: URL = folder(.cachesDirectory, "audio")
     static let offlineDir: URL = folder(.applicationSupportDirectory, "offline")
@@ -50,12 +51,13 @@ actor AudioCache {
     }
 
     /// the song ready to play: from the phone, or fetched now (one fetch per song at a time)
-    func playable(videoId: String) async throws -> PlaybackSource {
+    func playable(videoId: String, preferStream: Bool = false) async throws -> PlaybackSource {
         if let file = Self.localFile(videoId) { return .file(file) }
-        if let running = inflight[videoId] { return try await running.value }
-        let task = Task { try await Self.fetch(videoId) }
-        inflight[videoId] = task
-        defer { inflight[videoId] = nil }
+        let key = (preferStream ? "play:" : "file:") + videoId
+        if let running = inflight[key] { return try await running.value }
+        let task = Task { try await fetch(videoId, preferStream: preferStream) }
+        inflight[key] = task
+        defer { inflight[key] = nil }
         return try await task.value
     }
 
@@ -81,19 +83,17 @@ actor AudioCache {
         try? FileManager.default.moveItem(at: offline, to: cacheFile(videoId))
     }
 
-    private static func fetch(_ videoId: String) async throws -> PlaybackSource {
+    private func fetch(_ videoId: String, preferStream: Bool) async throws -> PlaybackSource {
         var lastError: Error = HKError("YouTube не отдал этот трек")
         var fallback: URL?
         for client in ClientConfigStore.shared.current.players {
             do {
                 let stream = try await StreamResolver.resolve(videoId: videoId, client: client)
                 if let db = stream.loudnessDb { Loudness.save(videoId, db) }
+                if preferStream, let hls = stream.hls { return .stream(hls) }
                 if fallback == nil { fallback = stream.hls }
                 if let file = stream.file {
-                    let destination = cacheFile(videoId)
-                    try await ChunkedDownload.fetch(file, length: stream.contentLength, userAgent: stream.userAgent, to: destination)
-                    trim()
-                    return .file(destination)
+                    return .file(try await download(file, length: stream.contentLength, userAgent: stream.userAgent, videoId: videoId))
                 }
             } catch {
                 lastError = error
@@ -103,6 +103,20 @@ actor AudioCache {
         }
         if let fallback { return .stream(fallback) }
         throw lastError
+    }
+
+    private func download(_ url: URL, length: Int?, userAgent: String, videoId: String) async throws -> URL {
+        if let file = Self.localFile(videoId) { return file }
+        if let existing = transfers[videoId] { return try await existing.value }
+        let destination = Self.cacheFile(videoId)
+        let task = Task {
+            try await ChunkedDownload.fetch(url, length: length, userAgent: userAgent, to: destination)
+            Self.trim()
+            return destination
+        }
+        transfers[videoId] = task
+        defer { transfers[videoId] = nil }
+        return try await task.value
     }
 
     static func bytes(in dir: URL) -> Int64 {

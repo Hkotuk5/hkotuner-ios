@@ -3,6 +3,7 @@ import SwiftUI
 struct OnlineAccountView: View {
     private let startScreen: Bool
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var sync = DeviceSync.shared
     @State private var username = ""
     @State private var password = ""
@@ -41,9 +42,15 @@ struct OnlineAccountView: View {
                         SecureField("Повтори пароль", text: $confirmation)
                             .textContentType(.newPassword)
                             .onSubmit { submit() }
+                            .transition(reduceMotion ? .identity : .opacity.combined(with: .offset(y: 6)))
                     }
-                    Button(working ? "Подожди…" : (registering ? "Создать аккаунт" : "Войти")) { submit() }
-                        .disabled(!canSubmit)
+                    Button(action: submit) {
+                        HStack(spacing: 10) {
+                            if working { ProgressView().controlSize(.small) }
+                            Text(working ? "Подожди…" : (registering ? "Создать аккаунт" : "Войти"))
+                        }
+                    }
+                    .disabled(!canSubmit)
                     Button(registering ? "Уже есть аккаунт" : "Создать аккаунт") { switchForm() }
                         .disabled(working)
                 } footer: {
@@ -65,6 +72,7 @@ struct OnlineAccountView: View {
             }
         }
         .navigationTitle(startScreen ? "hkotuner" : "Онлайн-аккаунт")
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: working)
         .onAppear {
             if let current = sync.onlineUsername { username = current }
         }
@@ -76,7 +84,7 @@ struct OnlineAccountView: View {
     }
 
     private func switchForm() {
-        registering.toggle()
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) { registering.toggle() }
         password = ""
         confirmation = ""
         note = nil

@@ -15,10 +15,13 @@ struct RootView: View {
         Group {
             if sync.needsAccount {
                 NavigationStack { OnlineAccountView(startScreen: true) }
+                    .transition(.opacity)
             } else {
                 libraryTabs
+                    .transition(.opacity)
             }
         }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: sync.needsAccount)
         .onOpenURL(perform: open)
     }
 

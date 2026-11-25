@@ -49,7 +49,7 @@ final class Player: ObservableObject {
     }
 
     let engine = EnginePlayer()
-    private let stream = AVPlayer()
+    private var stream = AVPlayer()
     private let web = WebPlayer.shared
     private enum Backend { case none, engine, stream, web }
     /// After a bot check or rate limit, give direct playback a break.
@@ -58,7 +58,7 @@ final class Player: ObservableObject {
 
     private var ticker: Timer?
     private var loadTask: Task<Void, Never>?
-    private typealias StreamRequest = Task<EmbeddedAudioResolver.AudioAddress, Error>
+    private typealias StreamRequest = Task<BufferedStream, Error>
     private var preparedStream: (id: String, url: String, request: StreamRequest)?
     private var desktopPoll: Task<Void, Never>?
     private var desktopCommand: Task<Void, Never>?
@@ -68,6 +68,7 @@ final class Player: ObservableObject {
     private var artwork: MPMediaItemArtwork?
     private var artworkFor: String?
     private var bag = Set<AnyCancellable>()
+    private var streamStatus: AnyCancellable?
     private var itemStatus: AnyCancellable?
     private var streamDurationTask: Task<Void, Never>?
     private var streamDuration: Double?
@@ -82,8 +83,7 @@ final class Player: ObservableObject {
     private var library: LibraryStore { LibraryStore.shared }
 
     private init() {
-        stream.automaticallyWaitsToMinimizeStalling = true
-        stream.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+        observeStream()
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: .longFormAudio)
 
         engine.onFinish = { [weak self] in self?.finished() }
@@ -100,16 +100,6 @@ final class Player: ObservableObject {
         // not AudioSettings.apply(): that asks for Player.shared, which is being made right now
         engine.setEqualizer(on: AudioSettings.shared.eqOn, gains: AudioSettings.shared.gains)
 
-        stream.publisher(for: \.timeControlStatus)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] status in
-                Task { @MainActor in
-                    guard let self, self.backend == .stream else { return }
-                    self.isPlaying = status != .paused
-                    self.updateNowPlaying()
-                }
-            }
-            .store(in: &bag)
         NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] note in
@@ -531,6 +521,46 @@ final class Player: ObservableObject {
 
     // MARK: loading
 
+    private final class BufferedStream {
+        let audio: EmbeddedAudioResolver.AudioAddress
+        let player: AVPlayer
+        private var readiness: AnyCancellable?
+
+        init(_ audio: EmbeddedAudioResolver.AudioAddress) {
+            self.audio = audio
+            let item = AVPlayerItem(url: audio.url)
+            item.preferredForwardBufferDuration = 3
+            let player = AVPlayer(playerItem: item)
+            self.player = player
+            readiness = player.publisher(for: \.status)
+                .receive(on: DispatchQueue.main)
+                .filter { $0 == .readyToPlay }
+                .prefix(1)
+                .sink { [weak player] _ in player?.preroll(atRate: 1) { _ in } }
+        }
+
+        func prepareForPlayback() {
+            readiness?.cancel()
+            player.cancelPendingPrerolls()
+            player.currentItem?.preferredForwardBufferDuration = 0
+        }
+    }
+
+    private func observeStream() {
+        let player = stream
+        player.automaticallyWaitsToMinimizeStalling = true
+        player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+        streamStatus = player.publisher(for: \.timeControlStatus)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak player] status in
+                Task { @MainActor in
+                    guard let self, let player, player === self.stream, self.backend == .stream else { return }
+                    self.isPlaying = status != .paused
+                    self.updateNowPlaying()
+                }
+            }
+    }
+
     private func load(startAt: Double? = nil) {
         loadTask?.cancel()
         resumeAt = nil
@@ -568,10 +598,10 @@ final class Player: ObservableObject {
                 UIApplication.shared.endBackgroundTask(background)
             }
             do {
-                let source = try await Player.source(for: track, warmed: warmed)
+                let (source, buffered) = try await Player.source(for: track, warmed: warmed)
                 guard !Task.isCancelled, self.current?.id == track.id else { return }
                 try? AVAudioSession.sharedInstance().setActive(true)
-                self.start(source, track: track, at: startAt)
+                self.start(source, buffered: buffered, track: track, at: startAt)
                 self.isLoading = false
                 self.failures = 0
                 self.library.pushHistory(track)
@@ -653,7 +683,7 @@ final class Player: ObservableObject {
         }
     }
 
-    private func start(_ source: PlaybackSource, track: Track, at: Double?) {
+    private func start(_ source: PlaybackSource, buffered: BufferedStream?, track: Track, at: Double?) {
         if case .file(let url) = source {
             do {
                 try engine.open(url)
@@ -670,7 +700,16 @@ final class Player: ObservableObject {
                 engine.stop()
             }
         }
-        let item = AVPlayerItem(url: source.url)
+        let item: AVPlayerItem
+        if let buffered, let readyItem = buffered.player.currentItem, readyItem.status != .failed {
+            buffered.prepareForPlayback()
+            stream = buffered.player
+            observeStream()
+            item = readyItem
+        } else {
+            item = AVPlayerItem(url: source.url)
+            stream.replaceCurrentItem(with: item)
+        }
         if case .stream(_, let duration) = source {
             streamDuration = StreamTiming.valid(duration) ?? StreamTiming.valid(track.duration)
             if let streamDuration { length = streamDuration }
@@ -679,11 +718,16 @@ final class Player: ObservableObject {
         backend = .stream
         throughEngine = false
         stream.volume = sleepFade
-        stream.replaceCurrentItem(with: item)
+        var seeking = false
         if let at, at > 0, streamDuration.map({ at < $0 }) ?? true {
+            seeking = true
             stream.seek(to: CMTime(seconds: at, preferredTimescale: 600))
         }
-        stream.play()
+        if !seeking, item.status == .readyToPlay, item.isPlaybackLikelyToKeepUp {
+            stream.playImmediately(atRate: 1)
+        } else {
+            stream.play()
+        }
 
         if streamDuration == nil, source.url.scheme == "https", source.url.pathExtension.lowercased() == "m3u8" {
             streamDurationTask = Task { [weak self, weak item] in
@@ -765,43 +809,45 @@ final class Player: ObservableObject {
             }
     }
 
-    private static func source(for track: Track, warmed: StreamRequest?) async throws -> PlaybackSource {
-        if let saved = Downloads.shared.source(for: track) { return saved }
+    private static func source(for track: Track, warmed: StreamRequest?) async throws -> (PlaybackSource, BufferedStream?) {
+        if let saved = Downloads.shared.source(for: track) { return (saved, nil) }
         if track.isAudioStream {
             guard let url = track.audioStreamURL else { throw HKError("нужна прямая HTTPS-ссылка на аудио") }
-            return .stream(url)
+            return (.stream(url), try await buffered(warmed))
         }
         if track.isLocal {
             let file = LocalFiles.fileURL(track)
             guard FileManager.default.fileExists(atPath: file.path) else { throw HKError("файла больше нет на телефоне") }
-            return .file(file)
+            return (.file(file), nil)
         }
         let id = track.videoId
         guard track.isSoundCloud || id != nil else { throw HKError("этот трек играет только на компьютере") }
-        if let id, let file = AudioCache.localFile(id) { return .file(file) }
+        if let id, let file = AudioCache.localFile(id) { return (.file(file), nil) }
         do {
-            if let warmed {
-                let result = await withTaskCancellationHandler {
-                    await warmed.result
-                } onCancel: {
-                    warmed.cancel()
-                }
-                try Task.checkCancellation()
-                switch result {
-                case .success(let audio) where audio.reuseDeadline > Date():
-                    return .stream(audio.url, duration: audio.duration)
-                case .failure(let error) where providerLimited(error):
-                    throw error
-                default:
-                    break
-                }
+            if let ready = try await buffered(warmed) {
+                return (.stream(ready.audio.url, duration: ready.audio.duration), ready)
             }
             let audio = try await EmbeddedAudioResolver.address(for: track, download: false)
-            return .stream(audio.url, duration: audio.duration)
+            return (.stream(audio.url, duration: audio.duration), nil)
         } catch {
             try Task.checkCancellation()
             guard !providerLimited(error), !track.isSoundCloud, let id else { throw error }
-            return try await AudioCache.shared.playable(videoId: id)
+            return (try await AudioCache.shared.playable(videoId: id, preferStream: true), nil)
+        }
+    }
+
+    private static func buffered(_ request: StreamRequest?) async throws -> BufferedStream? {
+        guard let request else { return nil }
+        let result = await withTaskCancellationHandler {
+            await request.result
+        } onCancel: {
+            request.cancel()
+        }
+        try Task.checkCancellation()
+        switch result {
+        case .success(let ready) where ready.audio.reuseDeadline > Date(): return ready
+        case .failure(let error) where providerLimited(error): throw error
+        default: return nil
         }
     }
 
@@ -809,7 +855,7 @@ final class Player: ObservableObject {
         error is BotCheckError || (error as? HTTPStatusError)?.code == 429
     }
 
-    /// Resolve just the next track before the current song finishes.
+    /// Resolve and buffer just the next item without playing it.
     private func prefetchNext() {
         let next = queue.indices.contains(index + 1) ? queue[index + 1] : nil
         if let preparedStream {
@@ -818,9 +864,17 @@ final class Player: ObservableObject {
             self.preparedStream = nil
         }
         guard backend != .none, !isLoading, length - position <= 60, let next,
-              next.isYouTube || next.isSoundCloud, !isOnPhoneForPrefetch(next), !pageFirst(for: next) else { return }
+              next.isYouTube || next.isSoundCloud || next.isAudioStream,
+              !isOnPhoneForPrefetch(next), !pageFirst(for: next) else { return }
         let request = Task(priority: .utility) {
-            try await EmbeddedAudioResolver.address(for: next, download: false)
+            let audio: EmbeddedAudioResolver.AudioAddress
+            if let url = next.audioStreamURL {
+                audio = .init(url: url, format: nil, hls: url.pathExtension.lowercased() == "m3u8", duration: next.duration)
+            } else {
+                audio = try await EmbeddedAudioResolver.address(for: next, download: false)
+            }
+            try Task.checkCancellation()
+            return BufferedStream(audio)
         }
         preparedStream = (next.id, next.url, request)
     }
