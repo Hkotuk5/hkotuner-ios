@@ -1,9 +1,12 @@
 import SwiftUI
 
 struct OnlineAccountView: View {
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject private var sync = DeviceSync.shared
     @State private var username = ""
     @State private var password = ""
+    @State private var confirmation = ""
+    @State private var registering = false
     @State private var working = false
     @State private var note: String?
 
@@ -30,12 +33,26 @@ struct OnlineAccountView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     SecureField("Пароль", text: $password)
-                        .textContentType(.password)
-                        .onSubmit { signIn() }
-                    Button(working ? "Вход…" : "Войти") { signIn() }
-                        .disabled(!canSignIn)
+                        .textContentType(registering ? .newPassword : .password)
+                        .onSubmit { submit() }
+                    if registering {
+                        SecureField("Повтори пароль", text: $confirmation)
+                            .textContentType(.newPassword)
+                            .onSubmit { submit() }
+                    }
+                    Button(working ? "Подожди…" : (registering ? "Создать аккаунт" : "Войти")) { submit() }
+                        .disabled(!canSubmit)
+                    Button(registering ? "Уже есть аккаунт" : "Создать аккаунт") { switchForm() }
+                        .disabled(working)
                 } footer: {
-                    Text("После входа hkotuner объединит любимые песни, плейлисты, профиль и итоги с данными этого аккаунта на сервере.")
+                    Text(registering ? "Пароль от 12 символов. Аккаунт синхронизирует медиатеку через интернет."
+                        : "При входе локальная медиатека, профиль и итоги объединятся с данными аккаунта.")
+                }
+                Section {
+                    Button("Продолжить без входа") { dismiss() }
+                        .disabled(working)
+                } footer: {
+                    Text("Локальная медиатека и синхронизация по Wi-Fi доступны без аккаунта.")
                 }
             }
             if let message = note ?? sync.error {
@@ -48,18 +65,36 @@ struct OnlineAccountView: View {
         }
     }
 
-    private var canSignIn: Bool { !working && !username.isEmpty && !password.isEmpty }
+    private var canSubmit: Bool {
+        !working && !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !password.isEmpty
+            && (!registering || !confirmation.isEmpty)
+    }
 
-    private func signIn() {
-        guard canSignIn else { return }
+    private func switchForm() {
+        registering.toggle()
+        password = ""
+        confirmation = ""
+        note = nil
+    }
+
+    private func submit() {
+        guard canSubmit else { return }
+        if registering && password != confirmation {
+            note = "Пароли не совпадают"
+            return
+        }
         working = true
         note = nil
+        let name = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let supplied = password
+        let creating = registering
         password = ""
+        confirmation = ""
         Task {
             defer { working = false }
             do {
-                try await sync.signInOnline(username: username, password: supplied)
+                try await sync.authenticateOnline(username: name, password: supplied, registering: creating)
+                registering = false
                 await sync.sync()
             } catch { note = error.localizedDescription }
         }

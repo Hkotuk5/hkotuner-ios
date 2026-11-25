@@ -25,6 +25,9 @@ struct OnlineAccount: Codable, Equatable {
 
     enum Failure: LocalizedError {
         case credentials
+        case badUsername
+        case weakPassword
+        case usernameTaken
         case expired
         case tooManyAttempts
         case server
@@ -35,6 +38,9 @@ struct OnlineAccount: Codable, Equatable {
         var errorDescription: String? {
             switch self {
             case .credentials: return "Неверный логин или пароль"
+            case .badUsername: return "Логин: 3–24 латинские буквы, цифры или символы . _ -"
+            case .weakPassword: return "Пароль должен быть от 12 символов, до 256 байт и отличаться от логина"
+            case .usernameTaken: return "Этот логин уже занят"
             case .expired: return "Сессия закончилась. Войди в аккаунт снова."
             case .tooManyAttempts: return "Слишком много попыток. Попробуй позже."
             case .server: return "Сервер синхронизации сейчас недоступен"
@@ -76,10 +82,10 @@ struct OnlineAccount: Codable, Equatable {
         return url
     }
 
-    static func signIn(username: String, password: String) async throws -> Self {
+    static func authenticate(username: String, password: String, registering: Bool) async throws -> Self {
         let url = try endpoint(serverAddress)
         let body = try JSONEncoder().encode(Credentials(username: username, password: password))
-        let data = try await send("login", server: url, token: nil, body: body)
+        let data = try await send(registering ? "register" : "login", server: url, token: nil, body: body)
         let reply = try JSONDecoder().decode(Login.self, from: data)
         guard reply.token.utf8.count == 43, !reply.username.isEmpty else { throw Failure.server }
         return Self(server: url, username: reply.username, token: reply.token)
@@ -113,14 +119,21 @@ struct OnlineAccount: Codable, Equatable {
         guard let status = (response as? HTTPURLResponse)?.statusCode else { throw Failure.server }
         switch status {
         case 200, 204: return data
+        case 201 where action == "register": return data
+        case 400 where action == "register":
+            let code = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
+            if code == "bad_username" { throw Failure.badUsername }
+            if code == "weak_password" { throw Failure.weakPassword }
+            throw HKError("Проверь логин и пароль")
         case 401: throw token == nil ? Failure.credentials : Failure.expired
+        case 404 where action == "register": throw HKError("Для регистрации обнови сервер hkotuner.")
         case 404 where action == "playback":
             if let error = try? JSONDecoder().decode([String: String].self, from: data),
                error["error"] == "device_unavailable" {
                 throw HKError("Компьютер уже не в сети.")
             }
             throw HKError("Для выбора ПК обнови сервер hkotuner.")
-        case 409: throw Failure.tooManyDevices
+        case 409: throw action == "register" ? Failure.usernameTaken : Failure.tooManyDevices
         case 413: throw Failure.tooLarge
         case 429: throw Failure.tooManyAttempts
         default: throw Failure.server

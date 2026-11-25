@@ -61,7 +61,6 @@ final class DeviceSync: ObservableObject {
     private var journal = Journal()
     private var key: Data?
     private var online: OnlineAccount?
-    private var onlineSelected = UserDefaults.standard.bool(forKey: "sync.onlineSelected")
     private var journalURL: URL {
         let name = online.map { "\($0.identity).json" } ?? "lan-sync.json"
         return folder.appendingPathComponent(name)
@@ -86,17 +85,15 @@ final class DeviceSync: ObservableObject {
 
     private func restoreJournal() {
         journal = load(Journal.self, from: journalURL) ?? Journal()
-        let label = online?.identity ?? (onlineSelected ? nil : key.map(LanConnection.serviceLabel))
+        let label = online?.identity ?? key.map(LanConnection.serviceLabel)
         lastSync = journal.server == label ? journal.lastSync : nil
         remoteListening = journal.server == label ? journal.remoteListening : ListeningSummary()
     }
 
-    func signInOnline(username: String, password: String) async throws {
-        let account = try await OnlineAccount.signIn(username: username, password: password)
+    func authenticateOnline(username: String, password: String, registering: Bool) async throws {
+        let account = try await OnlineAccount.authenticate(username: username, password: password, registering: registering)
         try Task.checkCancellation()
         try account.save()
-        onlineSelected = true
-        UserDefaults.standard.set(true, forKey: "sync.onlineSelected")
         setOnline(account)
         schedule()
     }
@@ -106,6 +103,7 @@ final class DeviceSync: ObservableObject {
         try OnlineAccount.remove()
         setOnline(nil)
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshID)
+        schedule()
         try await account.signOut()
     }
 
@@ -149,11 +147,6 @@ final class DeviceSync: ObservableObject {
             desktopAddress = UserDefaults.standard.string(forKey: Self.addressKey(bytes)).flatMap(DesktopAddress.init)
         }
         if let hint { setAddress(hint, for: bytes) }
-        if onlineSelected {
-            onlineSelected = false
-            UserDefaults.standard.set(false, forKey: "sync.onlineSelected")
-            restoreJournal()
-        }
         error = nil
         schedule()
     }
@@ -188,7 +181,7 @@ final class DeviceSync: ObservableObject {
     }
 
     func schedule() {
-        guard online != nil || (paired && !onlineSelected) else { return }
+        guard online != nil || paired else { return }
         let task = BGAppRefreshTaskRequest(identifier: Self.refreshID)
         task.earliestBeginDate = Date().addingTimeInterval(20 * 60)
         try? BGTaskScheduler.shared.submit(task)
@@ -203,7 +196,7 @@ final class DeviceSync: ObservableObject {
 
     func sync() async {
         let account = online
-        let localKey = onlineSelected ? nil : key
+        let localKey = account == nil ? key : nil
         guard let label = account?.identity ?? localKey.map(LanConnection.serviceLabel), !syncing else { return }
         syncing = true
         defer { syncing = false }
@@ -237,7 +230,7 @@ final class DeviceSync: ObservableObject {
                     data = try await LanConnection(key: localKey, address: desktopAddress).send(payload)
                 } else { return }
                 try Task.checkCancellation()
-                guard online == account, account != nil || (!onlineSelected && key == localKey) else { return }
+                guard online == account, account != nil || key == localKey else { return }
                 let reply = try JSONDecoder().decode(Response.self, from: data)
                 let current = SharedLibrary(LibraryStore.shared.library)
                 let merged = SharedLibrary.merge(base: sent.library, local: reply.library, incoming: current)
@@ -263,9 +256,10 @@ final class DeviceSync: ObservableObject {
             guard online == account else { return }
             try? OnlineAccount.remove()
             setOnline(nil)
+            schedule()
             self.error = OnlineAccount.Failure.expired.localizedDescription
         } catch {
-            guard online == account, account != nil || (!onlineSelected && key == localKey) else { return }
+            guard online == account, account != nil || key == localKey else { return }
             self.error = error.localizedDescription
         }
     }
