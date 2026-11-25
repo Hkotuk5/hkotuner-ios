@@ -259,21 +259,24 @@ struct SettingsView: View {
         downloading = (0, tracks.count)
         Task {
             var failed = 0
+            var youtubeBlock: YouTubeDownloadBlock?
             for (i, track) in tracks.enumerated() {
                 do {
-                    try await downloads.keep(track)
+                    try await downloads.keep(track, youtubeBlock: youtubeBlock)
+                } catch let block as YouTubeDownloadBlock {
+                    youtubeBlock = block
+                    failed += 1
                 } catch {
                     failed += 1
-                    // a bot check stops every download: no point asking 500 times
-                    if error is BotCheckError {
-                        note = error.localizedDescription
-                        break
-                    }
                 }
                 downloading = (i + 1, tracks.count)
             }
             downloading = nil
-            if note == nil || failed == 0 { note = failed == 0 ? "Готово" : "Готово, не скачалось: \(failed)" }
+            if let youtubeBlock {
+                note = "Не скачалось \(songsText(failed)). \(youtubeBlock.localizedDescription)"
+            } else {
+                note = failed == 0 ? "Готово" : "Не скачалось \(songsText(failed))."
+            }
             measure()
         }
     }

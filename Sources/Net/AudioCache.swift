@@ -97,8 +97,8 @@ actor AudioCache {
                 }
             } catch {
                 lastError = error
-                // every client hears the same answer to a bot check
-                if error is BotCheckError { break }
+                // Stop requesting more addresses if YouTube asks us to back off.
+                if error is BotCheckError || (error as? HTTPStatusError)?.code == 429 { break }
             }
         }
         if let fallback { return .stream(fallback) }

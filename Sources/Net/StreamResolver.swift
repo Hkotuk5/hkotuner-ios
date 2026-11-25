@@ -143,6 +143,8 @@ enum ChunkedDownload {
                 lastError = HKError("YouTube прислал неполный кусок")
             } catch let error as HKError where error.message.contains("403") {
                 throw error
+            } catch let error as HTTPStatusError where error.code == 429 {
+                throw error
             } catch {
                 lastError = error
             }
@@ -156,6 +158,7 @@ enum ChunkedDownload {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         let (data, response) = try await HTTP.session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw HKError("нет ответа от YouTube") }
+        if http.statusCode == 429 { throw HTTPStatusError(code: 429, what: "YouTube") }
         guard http.statusCode == 206 || http.statusCode == 200 else {
             throw HKError("YouTube не отдал звук (\(http.statusCode))")
         }

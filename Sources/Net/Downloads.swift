@@ -2,6 +2,20 @@ import AVFoundation
 import CryptoKit
 import SwiftUI
 
+enum YouTubeDownloadBlock: LocalizedError {
+    case verificationRequired
+    case rateLimited
+
+    var errorDescription: String? {
+        switch self {
+        case .verificationRequired:
+            return "YouTube требует подтверждение и не разрешает скачивание. Для прослушивания онлайн открой «Плеер YouTube» в настройках."
+        case .rateLimited:
+            return "YouTube временно ограничил скачивание. Попробуй позже."
+        }
+    }
+}
+
 @MainActor
 final class Downloads: ObservableObject {
     static let shared = Downloads()
@@ -74,31 +88,36 @@ final class Downloads: ObservableObject {
         return result
     }
 
-    func keep(_ track: Track) async throws {
+    func keep(_ track: Track, youtubeBlock: YouTubeDownloadBlock? = nil) async throws {
         guard Self.supports(track), source(for: track) == nil, running.insert(track.id).inserted else { return }
         defer { running.remove(track.id) }
 
         let remote: EmbeddedAudioResolver.AudioAddress
-        if let id = track.videoId {
+        if track.isYouTube, let id = track.videoId {
+            let cached = AudioCache.localFile(id)
+            if cached == nil, let youtubeBlock { throw youtubeBlock }
             do {
-                if let file = AudioCache.localFile(id) {
-                    try await saveFile(file, for: track, format: "m4a", move: false)
-                    return
+                do {
+                    if let file = cached {
+                        try await saveFile(file, for: track, format: "m4a", move: false)
+                        return
+                    }
+                    if case .file(let file) = try await AudioCache.shared.playable(videoId: id) {
+                        try await saveFile(file, for: track, format: "m4a", move: false)
+                        return
+                    }
+                } catch where !(error is CancellationError)
+                    && !(error is BotCheckError)
+                    && (error as? HTTPStatusError)?.code != 429 {
+                    // The native resolver can supply a different format.
                 }
-                if case .file(let file) = try await AudioCache.shared.playable(videoId: id) {
-                    try await saveFile(file, for: track, format: "m4a", move: false)
-                    return
-                }
-            } catch is CancellationError {
-                throw CancellationError()
+                if let youtubeBlock { throw youtubeBlock }
+                remote = try await EmbeddedAudioResolver.address(for: track, download: true)
             } catch is BotCheckError {
-                throw BotCheckError()
+                throw YouTubeDownloadBlock.verificationRequired
             } catch let error as HTTPStatusError where error.code == 429 {
-                throw error
-            } catch {
-                // The native resolver can supply a different format.
+                throw YouTubeDownloadBlock.rateLimited
             }
-            remote = try await EmbeddedAudioResolver.address(for: track, download: true)
         } else if let url = track.audioStreamURL {
             remote = .init(url: url, format: url.pathExtension.lowercased(), hls: url.pathExtension.lowercased() == "m3u8")
         } else {
@@ -109,6 +128,9 @@ final class Downloads: ObservableObject {
         } else {
             let (temp, response) = try await URLSession.shared.download(from: remote.url)
             defer { try? FileManager.default.removeItem(at: temp) }
+            if track.isYouTube, (response as? HTTPURLResponse)?.statusCode == 429 {
+                throw YouTubeDownloadBlock.rateLimited
+            }
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
                   http.url?.scheme == "https" else { throw HKError("Не удалось скачать аудиофайл") }
             try await saveFile(temp, for: track, format: remote.format ?? "m4a", move: true)

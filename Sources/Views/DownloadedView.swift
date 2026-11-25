@@ -20,6 +20,8 @@ struct DownloadAction: View {
                             try await downloads.keep(track)
                             if downloads.source(for: track) != nil { player.message = "Скачано: \(track.title)" }
                         } catch is CancellationError {
+                        } catch let block as YouTubeDownloadBlock {
+                            player.message = block.localizedDescription
                         } catch {
                             player.message = "Не удалось скачать: \(error.localizedDescription)"
                         }
