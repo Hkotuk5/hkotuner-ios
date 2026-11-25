@@ -224,6 +224,39 @@ final class DeviceSync: ObservableObject {
         scheduleOnlineChanges()
     }
 
+    func followOnlineEvents() async {
+        guard let account = online else { return }
+        let device = journal.device
+        var delay = 1
+        while !Task.isCancelled && online == account {
+            do {
+                try await account.receiveUpdates(device: device) {
+                    guard self.online == account, !Task.isCancelled else { return }
+                    delay = 1
+                    self.onlineChanged()
+                }
+            } catch OnlineAccount.Failure.expired {
+                if !Task.isCancelled { expireOnline(account) }
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                // Reconnect after a network interruption and request any missed changes.
+            }
+            do { try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000) }
+            catch { return }
+            delay = min(delay * 2, 20)
+        }
+    }
+
+    private func expireOnline(_ account: OnlineAccount) {
+        guard online == account else { return }
+        try? OnlineAccount.remove()
+        returnToSignIn()
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshID)
+        error = OnlineAccount.Failure.expired.localizedDescription
+    }
+
     private func scheduleOnlineChanges() {
         guard online != nil, onlineChangesPending, scheduledOnlineSync == nil, !syncing else { return }
         let delay = max(0.75, onlineAllowedAt - ProcessInfo.processInfo.systemUptime)
@@ -310,16 +343,12 @@ final class DeviceSync: ObservableObject {
             }
         } catch is CancellationError {
         } catch OnlineAccount.Failure.expired {
-            guard online == account else { return }
-            try? OnlineAccount.remove()
-            returnToSignIn()
-            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.refreshID)
-            self.error = OnlineAccount.Failure.expired.localizedDescription
+            if let account { expireOnline(account) }
         } catch {
             guard !needsAccount, online == account, account != nil || key == localKey else { return }
             if account != nil {
                 onlineAllowedAt = ProcessInfo.processInfo.systemUptime + 25
-                onlineChangesPending = onlineChangesPending || journal.pending != nil
+                onlineChangesPending = true
             }
             self.error = error.localizedDescription
         }

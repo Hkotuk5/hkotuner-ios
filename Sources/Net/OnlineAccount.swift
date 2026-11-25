@@ -66,6 +66,13 @@ struct OnlineAccount: Codable, Equatable {
         return URLSession(configuration: config, delegate: NoRedirect(), delegateQueue: nil)
     }()
 
+    private static let events: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 35
+        config.httpShouldSetCookies = false
+        return URLSession(configuration: config, delegate: NoRedirect(), delegateQueue: nil)
+    }()
+
     static func endpoint(_ input: String) throws -> URL {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
         let address = value.contains("://") ? value : "https://" + value
@@ -94,6 +101,29 @@ struct OnlineAccount: Codable, Equatable {
     func exchange(_ payload: Data) async throws -> Data {
         guard payload.count <= 24 * 1024 * 1024 else { throw Failure.tooLarge }
         return try await Self.send("sync", server: server, token: token, body: payload)
+    }
+
+    @MainActor
+    func receiveUpdates(device: String, changed: () -> Void) async throws {
+        let endpoint = server.appendingPathComponent("v1").appendingPathComponent("sync").appendingPathComponent("events")
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else { throw Failure.server }
+        components.queryItems = [URLQueryItem(name: "device", value: device)]
+        guard let url = components.url else { throw Failure.server }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        let (bytes, response) = try await Self.events.bytes(for: request)
+        guard let response = response as? HTTPURLResponse else { throw Failure.server }
+        if response.statusCode == 401 { throw Failure.expired }
+        guard response.statusCode == 200,
+              response.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("text/event-stream") == true else {
+            throw Failure.server
+        }
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            if line == "data: expired" { throw Failure.expired }
+            if line == "data: sync" { changed() }
+        }
     }
 
     func playback(_ command: DesktopPlaybackRequest) async throws -> DesktopPlaybackReply {

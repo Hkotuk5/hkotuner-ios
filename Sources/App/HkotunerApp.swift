@@ -7,10 +7,16 @@ struct HkotunerApp: App {
     @StateObject private var player = Player.shared
     @StateObject private var library = LibraryStore.shared
     @StateObject private var account = YTAccount.shared
+    @StateObject private var sync = DeviceSync.shared
     @AppStorage("accent") private var accent = "amber"
     @AppStorage("accent.custom") private var customAccent = "#f0a640"
     @AppStorage("appearance") private var appearance = "dark"
     @Environment(\.scenePhase) private var phase
+
+    private struct SyncActivity: Equatable {
+        let phase: ScenePhase
+        let username: String?
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -26,19 +32,21 @@ struct HkotunerApp: App {
                     await ClientConfigStore.shared.refresh()
                     await Updates.shared.checkIfDue()
                 }
-                .task(id: phase) {
+                .task(id: SyncActivity(phase: phase, username: sync.onlineUsername)) {
                     guard phase == .active else { return }
-                    let sync = DeviceSync.shared
                     sync.schedule()
+                    if sync.onlineUsername != nil {
+                        await sync.followOnlineEvents()
+                        return
+                    }
                     while !Task.isCancelled {
                         await sync.sync()
-                        let delay: UInt64 = sync.onlineUsername == nil ? 25_000_000_000 : 10_000_000_000
-                        do { try await Task.sleep(nanoseconds: delay) }
+                        do { try await Task.sleep(nanoseconds: 25_000_000_000) }
                         catch { return }
                     }
                 }
-                .onReceive(library.sharedChanges) { _ in DeviceSync.shared.onlineChanged() }
-                .onReceive(StatsStore.shared.listeningChanges) { _ in DeviceSync.shared.onlineChanged() }
+                .onReceive(library.sharedChanges) { _ in sync.onlineChanged() }
+                .onReceive(StatsStore.shared.listeningChanges) { _ in sync.onlineChanged() }
                 .onChange(of: phase) { now in
                     if now == .background {
                         player.saveSession()
