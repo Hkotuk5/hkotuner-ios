@@ -91,8 +91,8 @@ final class DeviceSync: ObservableObject {
         remoteListening = journal.server == label ? journal.remoteListening : ListeningSummary()
     }
 
-    func signInOnline(server: String, username: String, password: String) async throws {
-        let account = try await OnlineAccount.signIn(server: server, username: username, password: password)
+    func signInOnline(username: String, password: String) async throws {
+        let account = try await OnlineAccount.signIn(username: username, password: password)
         try Task.checkCancellation()
         try account.save()
         onlineSelected = true

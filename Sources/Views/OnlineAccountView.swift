@@ -2,7 +2,6 @@ import SwiftUI
 
 struct OnlineAccountView: View {
     @ObservedObject private var sync = DeviceSync.shared
-    @State private var server = ""
     @State private var username = ""
     @State private var password = ""
     @State private var working = false
@@ -26,11 +25,6 @@ struct OnlineAccountView: View {
                 }
             } else {
                 Section {
-                    TextField("Адрес сервера", text: $server, prompt: Text("https://sync.example.com"))
-                        .textContentType(.URL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
                     TextField("Логин", text: $username)
                         .textContentType(.username)
                         .textInputAutocapitalization(.never)
@@ -50,12 +44,11 @@ struct OnlineAccountView: View {
         }
         .navigationTitle("Онлайн-аккаунт")
         .onAppear {
-            if let address = sync.onlineServer { server = address }
             if let current = sync.onlineUsername { username = current }
         }
     }
 
-    private var canSignIn: Bool { !working && !server.isEmpty && !username.isEmpty && !password.isEmpty }
+    private var canSignIn: Bool { !working && !username.isEmpty && !password.isEmpty }
 
     private func signIn() {
         guard canSignIn else { return }
@@ -66,7 +59,7 @@ struct OnlineAccountView: View {
         Task {
             defer { working = false }
             do {
-                try await sync.signInOnline(server: server, username: username, password: supplied)
+                try await sync.signInOnline(username: username, password: supplied)
                 await sync.sync()
             } catch { note = error.localizedDescription }
         }

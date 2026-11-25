@@ -3,6 +3,7 @@ import Foundation
 import Security
 
 struct OnlineAccount: Codable, Equatable {
+    private static let serverAddress = "https://146.103.57.133"
     let server: URL
     let username: String
     private let token: String
@@ -37,7 +38,7 @@ struct OnlineAccount: Codable, Equatable {
             case .expired: return "Сессия закончилась. Войди в аккаунт снова."
             case .tooManyAttempts: return "Слишком много попыток. Попробуй позже."
             case .server: return "Сервер синхронизации сейчас недоступен"
-            case .invalidAddress: return "Введи HTTPS-адрес сервера, например https://sync.example.com"
+            case .invalidAddress: return "Неверный HTTPS-адрес сервера"
             case .tooLarge: return "Слишком много данных для одной синхронизации"
             case .tooManyDevices: return "Достигнут лимит устройств этого аккаунта"
             }
@@ -75,8 +76,8 @@ struct OnlineAccount: Codable, Equatable {
         return url
     }
 
-    static func signIn(server: String, username: String, password: String) async throws -> Self {
-        let url = try endpoint(server)
+    static func signIn(username: String, password: String) async throws -> Self {
+        let url = try endpoint(serverAddress)
         let body = try JSONEncoder().encode(Credentials(username: username, password: password))
         let data = try await send("login", server: url, token: nil, body: body)
         let reply = try JSONDecoder().decode(Login.self, from: data)
