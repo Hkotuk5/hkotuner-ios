@@ -11,6 +11,7 @@ struct SettingsView: View {
     @AppStorage("accent") private var accent = "amber"
     @AppStorage("accent.custom") private var customAccent = "#f0a640"
     @AppStorage("appearance") private var appearance = "dark"
+    @AppStorage("accent.fromCover") private var coverAccent = false
     @State private var cacheBytes: Int64 = 0
     @State private var offlineBytes: Int64 = 0
     @State private var downloading: (done: Int, total: Int)?
@@ -53,6 +54,9 @@ struct SettingsView: View {
             Section("Оформление") {
                 NavigationLink("Свой фон") { WallpaperSettingsView() }
                 NavigationLink("Мои темы") { SavedLooksView() }
+                NavigationLink("Порядок блоков на главной") { HomeOrderSettings() }
+                NavigationLink("Кнопки мини-плеера") { MiniPlayerSettings() }
+                Toggle("Акцент по обложке", isOn: $coverAccent)
                 Picker("Тема", selection: $appearance) {
                     Text("Тёмная").tag("dark")
                     Text("Светлая").tag("light")

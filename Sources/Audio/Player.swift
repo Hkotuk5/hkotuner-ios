@@ -346,6 +346,17 @@ final class Player: ObservableObject {
         updateNowPlaying()
     }
 
+    var lyricPosition: Double {
+        guard isPlaying, desktop == nil else { return position }
+        switch backend {
+        case .engine: return engine.currentTime
+        case .stream:
+            let seconds = CMTimeGetSeconds(stream.currentTime())
+            return seconds.isFinite ? min(seconds, streamEnd ?? seconds) : position
+        case .web, .none: return position
+        }
+    }
+
     func cycleRepeat() {
         let all = Repeat.allCases
         repeatMode = all[(all.firstIndex(of: repeatMode)! + 1) % all.count]

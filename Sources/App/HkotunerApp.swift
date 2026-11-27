@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import ImageIO
 
 @main
 struct HkotunerApp: App {
@@ -10,7 +11,9 @@ struct HkotunerApp: App {
     @StateObject private var sync = DeviceSync.shared
     @AppStorage("accent") private var accent = "amber"
     @AppStorage("accent.custom") private var customAccent = "#f0a640"
+    @AppStorage("accent.fromCover") private var accentFromCover = false
     @AppStorage("appearance") private var appearance = "dark"
+    @State private var artworkAccent: (url: URL, hex: UInt32)?
     @Environment(\.scenePhase) private var phase
 
     private struct SyncActivity: Equatable {
@@ -25,8 +28,13 @@ struct HkotunerApp: App {
                 .environmentObject(library)
                 .environmentObject(account)
                 .preferredColorScheme(scheme)
-                .tint(Theme.color(accent, custom: customAccent))
-                .accentColor(Theme.color(accent, custom: customAccent))
+                .tint(activeAccent)
+                .accentColor(activeAccent)
+                .task(id: accentFromCover ? player.current?.thumbnailURL : nil) {
+                    guard accentFromCover, let url = player.current?.thumbnailURL,
+                          let hex = await Theme.accentFromArtwork(url), !Task.isCancelled else { return }
+                    artworkAccent = (url, hex)
+                }
                 .task {
                     library.autoBackupIfDue()
                     await ClientConfigStore.shared.refresh()
@@ -69,6 +77,13 @@ struct HkotunerApp: App {
         default: return .dark
         }
     }
+
+    private var activeAccent: Color {
+        if accentFromCover, let value = artworkAccent, value.url == player.current?.thumbnailURL {
+            return Theme.color(value.hex)
+        }
+        return Theme.color(accent, custom: customAccent)
+    }
 }
 
 enum Theme {
@@ -109,10 +124,57 @@ enum Theme {
         return String(format: "#%02x%02x%02x", rgb[0], rgb[1], rgb[2])
     }
 
-    private static func color(_ rgb: UInt32) -> Color {
+    static func color(_ rgb: UInt32) -> Color {
         Color(red: Double((rgb >> 16) & 255) / 255,
               green: Double((rgb >> 8) & 255) / 255,
               blue: Double(rgb & 255) / 255)
+    }
+
+    static func accentFromArtwork(_ url: URL) async -> UInt32? {
+        let bytes: Data
+        if url.isFileURL {
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+            bytes = data
+        } else {
+            guard let (data, response) = try? await URLSession.shared.data(from: url),
+                  let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode)
+            else { return nil }
+            bytes = data
+        }
+        guard !Task.isCancelled, let source = CGImageSourceCreateWithData(bytes as CFData, nil),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 24
+              ] as CFDictionary)
+        else { return nil }
+        let width = thumbnail.width
+        let height = thumbnail.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let sampled = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let ctx = CGContext(data: buffer.baseAddress, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            ctx.draw(thumbnail, in: CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+            return true
+        }
+        guard sampled else { return nil }
+        var buckets: [Int: (weight: Double, rgb: [Double])] = [:]
+        for index in stride(from: 0, to: pixels.count, by: 4) where pixels[index + 3] >= 240 {
+            let rgb = pixels[index..<(index + 3)].map { Double($0) / 255 }
+            let high = rgb.max() ?? 0, low = rgb.min() ?? 0
+            let chroma = high - low
+            guard chroma > 0.19 else { continue }
+            let key = rgb.reduce(0) { $0 * 4 + Int(min(3, $1 * 4)) }
+            let previous = buckets[key] ?? (0, [0, 0, 0])
+            let weighted = zip(previous.rgb, rgb).map { $0.0 + $0.1 * chroma }
+            buckets[key] = (previous.weight + chroma, weighted)
+        }
+        guard let best = buckets.values.max(by: { $0.weight < $1.weight }),
+              best.weight > Double(width * height) * 0.025 else { return nil }
+        return best.rgb.reduce(0) { result, channel in
+            (result << 8) | UInt32(((channel / best.weight * 0.74 + 0.13) * 255).rounded())
+        }
     }
 
     private static func dynamic(dark: (Double, Double, Double), light: (Double, Double, Double), alpha: Double = 1) -> Color {

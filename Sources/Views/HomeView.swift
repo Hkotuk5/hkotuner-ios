@@ -7,50 +7,15 @@ struct HomeView: View {
     @StateObject private var feed = HomeFeed.shared
     @StateObject private var releases = NewReleases.shared
     @ObservedObject private var sync = DeviceSync.shared
+    @AppStorage("home.order") private var homeOrder = ""
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     header
-                    WaveCard()
-                        .padding(.horizontal, 16)
-                    SmartRow()
-                    if !releases.items.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            SectionTitle(title: "Новое у ваших исполнителей")
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                LazyHStack(alignment: .top, spacing: 14) {
-                                    ForEach(releases.items) { release in
-                                        NavigationLink { CardDestination(card: release.card) } label: {
-                                            CardTile(card: MusicCard(id: release.card.id, kind: release.card.kind, title: release.card.title,
-                                                                     subtitle: release.artist, thumbnail: release.card.thumbnail))
-                                        }
-                                        .buttonStyle(.plain)
-                                    }
-                                }
-                                .padding(.horizontal, 16)
-                            }
-                        }
-                    }
-                    TrackShelf(title: "Недавно слушали", tracks: library.library.history,
-                               more: AnyView(HistoryView()))
-                    TrackShelf(title: "Любимые", tracks: library.library.liked,
-                               more: AnyView(LikedView()))
-                    ForEach(feed.shelves) { shelf in
-                        TrackShelf(title: shelf.title, tracks: shelf.tracks)
-                        CardShelf(title: shelf.tracks.isEmpty ? shelf.title : "", cards: shelf.cards)
-                    }
-                    if feed.loading && feed.shelves.isEmpty {
-                        ProgressView().frame(maxWidth: .infinity).padding(.vertical, 30)
-                    } else if let error = feed.error, feed.shelves.isEmpty {
-                        VStack(spacing: 8) {
-                            Text("Подборки YouTube Music не загрузились").font(.subheadline.weight(.semibold))
-                            Text(error).font(.caption).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
-                            Button("Ещё раз") { Task { await feed.load(force: true) } }
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 24)
+                    ForEach(HomeSection.order(homeOrder)) { section in
+                        content(for: section)
                     }
                 }
                 .padding(.top, 8)
@@ -65,6 +30,53 @@ struct HomeView: View {
             .task {
                 await feed.load()
                 await releases.load(library.library.artists)
+            }
+        }
+    }
+
+    @ViewBuilder private func content(for section: HomeSection) -> some View {
+        switch section {
+        case .wave:
+            WaveCard().padding(.horizontal, 16)
+        case .smart:
+            SmartRow()
+        case .releases:
+            if !releases.items.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    SectionTitle(title: "Новое у ваших исполнителей")
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(alignment: .top, spacing: 14) {
+                            ForEach(releases.items) { release in
+                                NavigationLink { CardDestination(card: release.card) } label: {
+                                    CardTile(card: MusicCard(id: release.card.id, kind: release.card.kind, title: release.card.title,
+                                                             subtitle: release.artist, thumbnail: release.card.thumbnail))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                }
+            }
+        case .recent:
+            TrackShelf(title: section.title, tracks: library.library.history, more: AnyView(HistoryView()))
+        case .liked:
+            TrackShelf(title: section.title, tracks: library.library.liked, more: AnyView(LikedView()))
+        case .feed:
+            ForEach(feed.shelves) { shelf in
+                TrackShelf(title: shelf.title, tracks: shelf.tracks)
+                CardShelf(title: shelf.tracks.isEmpty ? shelf.title : "", cards: shelf.cards)
+            }
+            if feed.loading && feed.shelves.isEmpty {
+                ProgressView().frame(maxWidth: .infinity).padding(.vertical, 30)
+            } else if let error = feed.error, feed.shelves.isEmpty {
+                VStack(spacing: 8) {
+                    Text("Подборки YouTube Music не загрузились").font(.subheadline.weight(.semibold))
+                    Text(error).font(.caption).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
+                    Button("Ещё раз") { Task { await feed.load(force: true) } }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 24)
             }
         }
     }

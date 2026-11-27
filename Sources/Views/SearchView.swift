@@ -7,14 +7,17 @@ struct SearchView: View {
     }
 
     enum Scope: String, CaseIterable, Identifiable {
-        case songs = "Песни", artists = "Исполнители", albums = "Альбомы", playlists = "Плейлисты"
+        case songs = "Песни", artists = "Артисты и композиторы", albums = "Альбомы", playlists = "Плейлисты"
         var id: String { rawValue }
     }
 
     @EnvironmentObject private var player: Player
+    @EnvironmentObject private var library: LibraryStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var query = ""
     @State private var provider = Provider.youtube
     @State private var scope = Scope.songs
+    @State private var filtersOpen = false
     @State private var songs: [Track] = []
     @State private var cards: [MusicCard] = []
     @State private var searching = false
@@ -29,10 +32,7 @@ struct SearchView: View {
     var body: some View {
         NavigationStack {
             List {
-                Picker("Источник", selection: $provider) {
-                    ForEach(Provider.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
+                filters
                 .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
@@ -118,20 +118,44 @@ struct SearchView: View {
         }
     }
 
-    /// the kinds of results, as the first row of the list (an inset at the
-    /// top slid under the iOS 26 search field)
-    private var scopePicker: some View {
-        Picker("Что искать", selection: $scope) {
-            ForEach(Scope.allCases) { Text($0.rawValue).tag($0) }
+    private var filters: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.22)) { filtersOpen.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "line.3.horizontal.decrease")
+                    Text("Фильтры").fontWeight(.semibold)
+                    Text(provider == .youtube ? scope.rawValue : provider.rawValue)
+                        .foregroundStyle(Theme.muted).lineLimit(1)
+                    Image(systemName: "chevron.down").font(.caption.weight(.semibold))
+                        .rotationEffect(.degrees(filtersOpen ? 180 : 0))
+                }
+                .frame(minHeight: 36)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityValue(filtersOpen ? "Раскрыто" : "Свёрнуто")
+            if filtersOpen {
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker("Источник", selection: $provider) {
+                        ForEach(Provider.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    if provider == .youtube {
+                        Picker("Что искать", selection: $scope) {
+                            ForEach(Scope.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.menu)
+                    }
+                }
+                .padding(.vertical, 4)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
-        .pickerStyle(.segmented)
-        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
+        .clipped()
     }
 
     @ViewBuilder private var results: some View {
-        if provider == .youtube { scopePicker }
         if searching {
             ProgressView().frame(maxWidth: .infinity).padding().listRowBackground(Color.clear)
         } else if let error {
@@ -146,13 +170,42 @@ struct SearchView: View {
                     .trackMenu(track)
             }
         } else {
-            if cards.isEmpty {
+            let composers = scope == .artists ? composerTracks : []
+            if cards.isEmpty && composers.isEmpty {
                 EmptyNote(icon: "questionmark", title: "Ничего не нашлось").listRowBackground(Color.clear)
             }
             ForEach(cards) { card in
-                NavigationLink { CardDestination(card: card) } label: { CardRow(card: card) }
+                if card.kind == .artist {
+                    NavigationLink { CardDestination(card: card) } label: {
+                        HStack(spacing: 9) {
+                            Artwork(url: card.thumbnailURL, size: 30, radius: 15)
+                                .accessibilityHidden(true)
+                            Text(card.title).fontWeight(.semibold).lineLimit(1)
+                        }
+                        .frame(minHeight: 36)
+                    }
+                    .buttonStyle(.bordered)
                     .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                } else {
+                    NavigationLink { CardDestination(card: card) } label: { CardRow(card: card) }
+                        .listRowBackground(Color.clear)
+                }
             }
+            ForEach(composers) { track in
+                TrackRow(track: track)
+                    .onTapGesture { player.playSingle(track) }
+                    .trackMenu(track)
+            }
+        }
+    }
+
+    private var composerTracks: [Track] {
+        let saved = library.library
+        let tracks = saved.local + saved.liked + saved.history + saved.playlists.flatMap(\.tracks)
+        var ids = Set<String>()
+        return tracks.filter { track in
+            track.composer?.localizedCaseInsensitiveContains(searched) == true && ids.insert(track.id).inserted
         }
     }
 
@@ -194,7 +247,13 @@ struct SearchView: View {
                     if !Task.isCancelled { cards = found }
                 }
             } catch {
-                if !Task.isCancelled { self.error = error.localizedDescription }
+                if !Task.isCancelled {
+                    if service == .youtube && wanted == .artists && !composerTracks.isEmpty {
+                        cards = []
+                    } else {
+                        self.error = error.localizedDescription
+                    }
+                }
             }
         }
     }

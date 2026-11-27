@@ -499,13 +499,19 @@ struct LyricsPane: View {
     }
 
     private var synced: some View {
-        let now = LyricsService.current(lines, at: player.position)
+        TimelineView(.animation(minimumInterval: 0.05, paused: !player.isPlaying || player.webAd)) { _ in
+            synced(at: player.lyricPosition)
+        }
+    }
+
+    private func synced(at position: Double) -> some View {
+        let now = LyricsService.current(lines, at: position)
         return GeometryReader { geometry in
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: 8) {
                         ForEach(lines) { line in
-                            lyricRow(line, active: line.id == now, past: line.id < (now ?? -1))
+                            lyricRow(line, active: line.id == now, past: line.id < (now ?? -1), position: position)
                                 .id(line.id)
                         }
                     }
@@ -535,17 +541,14 @@ struct LyricsPane: View {
         }
     }
 
-    private func lyricRow(_ line: LyricLine, active: Bool, past: Bool) -> some View {
+    private func lyricRow(_ line: LyricLine, active: Bool, past: Bool, position: Double) -> some View {
         let text = line.text.isEmpty ? "♪" : line.text
-        return Button { player.seek(to: line.time) } label: {
+        return Button { player.seek(to: max(0, line.time)) } label: {
             Group {
-                if active && !reduceMotion && !line.text.isEmpty {
-                    LyricHighlight(
-                        text: text,
-                        offset: player.position - line.time,
-                        span: LyricsService.lineSpan(line, in: lines, duration: player.length),
-                        playing: player.isPlaying && !player.webAd
-                    )
+                if active && !line.words.isEmpty {
+                    LyricSweep(line: line, offset: position - line.time,
+                               span: LyricsService.lineSpan(line, in: lines, duration: player.length),
+                               reduceMotion: reduceMotion)
                 } else {
                     Text(text).foregroundStyle(active ? Theme.ink : Theme.muted.opacity(past ? 0.78 : 1))
                 }
@@ -571,36 +574,6 @@ struct LyricsPane: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(active ? .isSelected : [])
-    }
-}
-
-private struct LyricHighlight: View {
-    let text: String
-    let offset: Double
-    let span: Double
-    let playing: Bool
-    @State private var paintedOffset: Double
-    @ScaledMetric(relativeTo: .title3) private var fontSize: CGFloat = 20
-
-    init(text: String, offset: Double, span: Double, playing: Bool) {
-        self.text = text
-        self.offset = offset
-        self.span = span
-        self.playing = playing
-        _paintedOffset = State(initialValue: offset)
-    }
-
-    var body: some View {
-        LyricSweep(text: text, fontSize: fontSize, color: Theme.ink,
-                   progress: min(1, max(0, paintedOffset / span)))
-            .accessibilityLabel(text)
-            .onChange(of: offset) { updated in
-                let step = updated - paintedOffset
-                let advance = playing && step > 0 && step <= 0.85
-                withAnimation(advance ? .linear(duration: 0.4) : nil) {
-                    paintedOffset = updated
-                }
-            }
     }
 }
 

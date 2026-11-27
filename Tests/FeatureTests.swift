@@ -223,6 +223,23 @@ final class AccountAndLyricsTests: XCTestCase {
         XCTAssertEqual(ending.map(\.time), [1, 4])
     }
 
+    func testKaraokeKeepsExactOnsetsAndEstimatesUntimedWords() {
+        let lyrics = "[offset:+200]\n[00:01.00]<00:01.20>Синий <00:02.00>свет<00:02.70>\n[00:05.00]Раз два три"
+        let lines = LyricsService.parseSynced(lyrics)
+        XCTAssertEqual(lines[0].text, "Синий свет")
+        XCTAssertEqual(lines[0].time, 0.8, accuracy: 0.001)
+        XCTAssertEqual(lines[0].wordOnsets(span: 4)[0], 0.2, accuracy: 0.001)
+        XCTAssertEqual(lines[0].wordOnsets(span: 4)[1], 1, accuracy: 0.001)
+        let estimates = lines[1].wordOnsets(span: 20)
+        XCTAssertEqual(estimates.count, 3)
+        XCTAssertEqual(estimates[1], 0.8, accuracy: 0.001)
+        XCTAssertEqual(estimates[2], 1.6, accuracy: 0.001)
+    }
+
+    func testHomeOrderAppendsMissingSectionsAndIgnoresUnknownItems() {
+        XCTAssertEqual(HomeSection.order("liked,unknown,liked,wave"), [.liked, .wave, .smart, .releases, .recent, .feed])
+    }
+
     func testVersions() {
         XCTAssertTrue(Updates.newer("0.10.0", than: "0.9.2"))
         XCTAssertFalse(Updates.newer("0.2.0", than: "0.2"))

@@ -145,6 +145,9 @@ struct MiniPlayer: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var player: Player
     @EnvironmentObject private var library: LibraryStore
+    @AppStorage("mini.previous") private var showPrevious = false
+    @AppStorage("mini.next") private var showNext = true
+    @AppStorage("mini.like") private var showLike = true
     let open: () -> Void
 
     var body: some View {
@@ -156,15 +159,24 @@ struct MiniPlayer: View {
                     Text(track.artist).font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
                 }
                 Spacer(minLength: 6)
-                Button { library.toggleLike(track) } label: {
-                    Image(systemName: library.isLiked(track) ? "heart.fill" : "heart")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(library.isLiked(track) ? Theme.accent : Theme.ink)
-                        .contentTransition(.opacity)
-                        .scaleEffect(library.isLiked(track) && !reduceMotion ? 1.12 : 1)
-                        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.5),
-                                   value: library.isLiked(track))
-                        .frame(width: 38, height: 44)
+                if showLike {
+                    Button { library.toggleLike(track) } label: {
+                        Image(systemName: library.isLiked(track) ? "heart.fill" : "heart")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(library.isLiked(track) ? Theme.accent : Theme.ink)
+                            .contentTransition(.opacity)
+                            .scaleEffect(library.isLiked(track) && !reduceMotion ? 1.12 : 1)
+                            .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.5),
+                                       value: library.isLiked(track))
+                            .frame(width: 38, height: 44)
+                    }
+                    .accessibilityLabel(library.isLiked(track) ? "Убрать из любимых" : "В любимые")
+                }
+                if showPrevious {
+                    Button { player.previous() } label: {
+                        Image(systemName: "backward.fill").font(.body).foregroundStyle(Theme.ink).frame(width: 36, height: 44)
+                    }
+                    .accessibilityLabel("Предыдущий")
                 }
                 .accessibilityLabel(library.isLiked(track) ? "Убрать из любимых" : "В любимые")
                 Button { player.toggle() } label: {
@@ -174,10 +186,12 @@ struct MiniPlayer: View {
                         .frame(width: 40, height: 44)
                 }
                 .accessibilityLabel(player.isPlaying ? "Пауза" : "Играть")
-                Button { player.next() } label: {
-                    Image(systemName: "forward.fill").font(.body).foregroundStyle(Theme.ink).frame(width: 36, height: 44)
+                if showNext {
+                    Button { player.next() } label: {
+                        Image(systemName: "forward.fill").font(.body).foregroundStyle(Theme.ink).frame(width: 36, height: 44)
+                    }
+                    .accessibilityLabel("Следующий")
                 }
-                .accessibilityLabel("Следующий")
             }
             .buttonStyle(.plain)
             .padding(.leading, 8)

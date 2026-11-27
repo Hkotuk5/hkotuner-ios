@@ -6,9 +6,41 @@ struct Lyrics: Equatable {
 }
 
 struct LyricLine: Identifiable, Equatable {
+    struct Word: Equatable {
+        let text: String
+        let offset: Double?
+    }
+
     let id: Int
     let time: Double
-    let text: String
+    let words: [Word]
+    let end: Double?
+
+    var text: String { words.map(\.text).joined(separator: " ") }
+
+    func wordOnsets(span: Double) -> [Double] {
+        guard !words.isEmpty else { return [] }
+        let lastMark = words.compactMap(\.offset).max() ?? 0
+        let estimate = min(10, Double(words.count) * 0.6 + 0.6)
+        let limit = max(lastMark, min(span, end ?? max(estimate, lastMark + 0.35)))
+        var first = 0
+        var from = words.first?.offset ?? 0
+        var onsets: [Double] = []
+        for index in 1...words.count {
+            guard let mark = index == words.count ? limit : words[index].offset else { continue }
+            let to = max(from, mark)
+            let weights = words[first..<index].map { max(1, $0.text.count) }
+            let total = Double(weights.reduce(0, +))
+            var elapsed = from
+            for weight in weights {
+                onsets.append(elapsed)
+                elapsed += (to - from) * Double(weight) / total
+            }
+            first = index
+            from = to
+        }
+        return onsets
+    }
 }
 
 /// Lyrics from LRCLIB (lrclib.net), a free open lyrics database: synced
@@ -81,8 +113,16 @@ actor LyricsService {
 
     /// "[01:02.50] words" lines in time order; a line may carry several stamps
     static func parseSynced(_ text: String) -> [LyricLine] {
-        var timed: [(Double, String)] = []
-        for raw in text.split(whereSeparator: \.isNewline) {
+        let rows = text.split(whereSeparator: \.isNewline)
+        let offset = rows.lazy.compactMap { row -> Double? in
+            let tag = row.trimmingCharacters(in: .whitespaces)
+            guard tag.hasPrefix("[offset:"), tag.hasSuffix("]"),
+                  let ms = Int(tag.dropFirst(8).dropLast().trimmingCharacters(in: .whitespaces))
+            else { return nil }
+            return Double(ms) / 1000
+        }.first ?? 0
+        var timed: [LyricLine] = []
+        for raw in rows {
             var rest = Substring(raw).drop(while: { $0 == " " })
             var stamps: [Double] = []
             while rest.first == "[", let close = rest.firstIndex(of: "]") {
@@ -90,10 +130,36 @@ actor LyricsService {
                 rest = rest[rest.index(after: close)...]
                 if let t = seconds(stamp) { stamps.append(t) }
             }
-            let words = rest.trimmingCharacters(in: .whitespaces)
-            for t in stamps { timed.append((t, words)) }
+            guard let start = stamps.first else { continue }
+            let cue = parseWords(rest, start: start)
+            for time in stamps {
+                timed.append(LyricLine(id: timed.count, time: time - offset, words: cue.words, end: cue.end))
+            }
         }
-        return timed.sorted { $0.0 < $1.0 }.enumerated().map { LyricLine(id: $0.offset, time: $0.element.0, text: $0.element.1) }
+        return timed.sorted { $0.time == $1.time ? $0.id < $1.id : $0.time < $1.time }
+            .enumerated().map { id, line in LyricLine(id: id, time: line.time, words: line.words, end: line.end) }
+    }
+
+    private static func parseWords(_ text: Substring, start: Double) -> (words: [LyricLine.Word], end: Double?) {
+        var words: [LyricLine.Word] = []
+        var cue: Double?
+        var segment = text.startIndex
+        func append(_ part: Substring) {
+            for word in part.split(whereSeparator: \.isWhitespace) {
+                words.append(LyricLine.Word(text: String(word), offset: cue))
+                cue = nil
+            }
+        }
+        for opening in text.indices where text[opening] == "<" {
+            let after = text.index(after: opening)
+            guard let closing = text[after...].firstIndex(of: ">"),
+                  let stamp = seconds(text[after..<closing]) else { continue }
+            append(text[segment..<opening])
+            cue = max(0, stamp - start)
+            segment = text.index(after: closing)
+        }
+        append(text[segment...])
+        return (words, cue)
     }
 
     /// "01:02.50" → 62.5
@@ -112,12 +178,12 @@ actor LyricsService {
             let time = lines[start].time
             var end = start + 1
             while end < lines.endIndex, lines[end].time == time { end += 1 }
-            if end > start + 1 {
+            if end > start + 1 && lines[start..<end].allSatisfy({ $0.words.allSatisfy { $0.offset == nil } }) {
                 let span = lineSpan(lines[start], in: lines, duration: duration)
                 for index in (start + 1)..<end {
                     let line = lines[index]
                     let offset = span * Double(index - start) / Double(end - start)
-                    timed[index] = LyricLine(id: line.id, time: time + offset, text: line.text)
+                    timed[index] = LyricLine(id: line.id, time: time + offset, words: line.words, end: line.end)
                 }
             }
             start = end
