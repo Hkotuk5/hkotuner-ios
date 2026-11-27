@@ -178,7 +178,6 @@ struct MiniPlayer: View {
                     }
                     .accessibilityLabel("Предыдущий")
                 }
-                .accessibilityLabel(library.isLiked(track) ? "Убрать из любимых" : "В любимые")
                 Button { player.toggle() } label: {
                     PlaybackGlyph(playing: player.isPlaying, loading: player.isLoading)
                         .font(.title3)
